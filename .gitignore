@@ -1,0 +1,28 @@
+# Build directories
+build/
+build-*/
+out/
+cmake-build-*/
+
+# Compiled binaries and archives
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+*.o
+*.obj
+*.tar.gz
+*.zip
+
+# Local game path cache and extracted original game assets (copyrighted)
+.opennfh_game_path.txt
+extracted/
+*.bnd
+*.tga
+*.mp3
+*.wav
+
+# Temporary screenshots
+shot_*.png

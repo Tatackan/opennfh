@@ -1,0 +1,85 @@
+name: Build Linux & Windows
+
+on:
+  push:
+    branches: [ main, master ]
+    tags: [ 'v*' ]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux:
+    name: Linux (Ubuntu x86_64)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Install SDL2 & build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            cmake \
+            ninja-build \
+            pkg-config \
+            libsdl2-dev \
+            libsdl2-ttf-dev \
+            libsdl2-mixer-dev \
+            zlib1g-dev
+
+      - name: Configure CMake
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build OpenNFH
+        run: cmake --build build --config Release
+
+      - name: Package Linux Release Archive
+        run: |
+          mkdir -p dist/opennfh-linux-x86_64
+          cp build/opennfh build/nfh-viewer build/nfh-extract README.md dist/opennfh-linux-x86_64/
+          cat << 'EOF' > dist/opennfh-linux-x86_64/run-opennfh.sh
+          #!/usr/bin/env bash
+          set -e
+          DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+          # Install runtime libraries on Debian/Ubuntu if missing:
+          # sudo apt install libsdl2-2.0-0 libsdl2-ttf-2.0-0 libsdl2-mixer-2.0-0 zlib1g
+          exec "$DIR/opennfh" "$@"
+          EOF
+          chmod +x dist/opennfh-linux-x86_64/opennfh \
+                   dist/opennfh-linux-x86_64/nfh-viewer \
+                   dist/opennfh-linux-x86_64/nfh-extract \
+                   dist/opennfh-linux-x86_64/run-opennfh.sh
+          tar -C dist -czf opennfh-linux-x86_64.tar.gz opennfh-linux-x86_64
+
+      - name: Upload Linux Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: opennfh-linux-x86_64
+          path: opennfh-linux-x86_64.tar.gz
+
+      - name: Publish Linux Build to GitHub Releases
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest-linux
+          name: "OpenNFH — Сборка для Linux (x86_64)"
+          body: |
+            Автоматическая сборка **OpenNFH** (`opennfh`, `nfh-viewer`, `nfh-extract`) для **Linux x86_64**.
+
+            ### Быстрый запуск на Linux (Ubuntu / Debian / Mint / SteamOS)
+            1. Установите системные библиотеки SDL2 (один раз):
+               ```bash
+               sudo apt update && sudo apt install -y libsdl2-2.0-0 libsdl2-ttf-2.0-0 libsdl2-mixer-2.0-0 zlib1g
+               ```
+            2. Распакуйте архив и запустите игру, указав путь к папке оригинальной игры (с папкой `data/*.bnd`):
+               ```bash
+               tar -xzf opennfh-linux-x86_64.tar.gz
+               cd opennfh-linux-x86_64
+               ./opennfh --game "/путь/к/Как достать соседа"
+               ```
+          prerelease: false
+          files: opennfh-linux-x86_64.tar.gz
