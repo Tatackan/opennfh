@@ -1042,6 +1042,19 @@ void GameEngine::onLeftClick(int worldX, int worldY, int screenX, int screenY, b
         po.currentAnim = "ms";
         po.nextAnim = "ms";
         po.animFrame = 0;
+      } else if (front.type == TaskStep::Type::TraverseDoor) {
+        if (front.objectIndex >= 0 && front.objectIndex < (int)level_.objects.size()) {
+          PlacedObject& doorIn = level_.objects[front.objectIndex];
+          doorIn.currentAnim = "ms";
+          doorIn.nextAnim = "ms";
+          doorIn.animFrame = 0;
+        }
+        if (front.outObjectIndex >= 0 && front.outObjectIndex < (int)level_.objects.size()) {
+          PlacedObject& doorOut = level_.objects[front.outObjectIndex];
+          doorOut.currentAnim = "ms";
+          doorOut.nextAnim = "ms";
+          doorOut.animFrame = 0;
+        }
       }
       if (woody_.hidingInObject < 0) {
         woody_.hidden = false;
@@ -1231,9 +1244,13 @@ void GameEngine::advanceObjectAnims() {
       if (anim.loop) {
         po.animFrame = 0;
       } else {
-        // Hold last frame while an active PlayAction/TraverseDoor step owns this object;
-        // the step itself transitions po.currentAnim at the exact completion tick.
-        po.animFrame = (int)anim.frames.size() - 1;
+        if (po.isDoor || po.currentAnim == "woody_enter" || po.currentAnim == "woody_leave") {
+          po.currentAnim = "ms";
+          po.nextAnim = "ms";
+          po.animFrame = 0;
+        } else {
+          po.animFrame = (int)anim.frames.size() - 1;
+        }
       }
     }
   }
@@ -2601,6 +2618,13 @@ void GameEngine::checkStealthDetection() {
       woody_.nextAnim = "ms2";
       woody_.animFrame = 0;
       woodyQueue_.clear();
+      for (PlacedObject& po : level_.objects) {
+        if (po.isDoor && (po.currentAnim == "woody_enter" || po.currentAnim == "woody_leave")) {
+          po.currentAnim = "ms";
+          po.nextAnim = "ms";
+          po.animFrame = 0;
+        }
+      }
       neighbor_.currentAnim = "ms2";
       neighbor_.nextAnim = "ms2";
       neighbor_.animFrame = 0;
@@ -2614,6 +2638,13 @@ void GameEngine::checkStealthDetection() {
   if (toLowerAscii(woody_.room) != toLowerAscii(neighbor_.room)) return;
 
   // Caught in the same room!
+  for (PlacedObject& po : level_.objects) {
+    if (po.isDoor && (po.currentAnim == "woody_enter" || po.currentAnim == "woody_leave")) {
+      po.currentAnim = "ms";
+      po.nextAnim = "ms";
+      po.animFrame = 0;
+    }
+  }
   if (!woodyQueue_.empty()) {
     const TaskStep& front = woodyQueue_.front();
     if (front.type == TaskStep::Type::PlayAction && front.objectIndex >= 0 &&
@@ -2622,6 +2653,19 @@ void GameEngine::checkStealthDetection() {
       po.currentAnim = "ms";
       po.nextAnim = "ms";
       po.animFrame = 0;
+    } else if (front.type == TaskStep::Type::TraverseDoor) {
+      if (front.objectIndex >= 0 && front.objectIndex < (int)level_.objects.size()) {
+        PlacedObject& doorIn = level_.objects[front.objectIndex];
+        doorIn.currentAnim = "ms";
+        doorIn.nextAnim = "ms";
+        doorIn.animFrame = 0;
+      }
+      if (front.outObjectIndex >= 0 && front.outObjectIndex < (int)level_.objects.size()) {
+        PlacedObject& doorOut = level_.objects[front.outObjectIndex];
+        doorOut.currentAnim = "ms";
+        doorOut.nextAnim = "ms";
+        doorOut.animFrame = 0;
+      }
     }
   }
   catchSequenceActive_ = true;
