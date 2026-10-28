@@ -2724,7 +2724,10 @@ void GameEngine::renderObject(const PlacedObject& po) {
   if (!gd) return;
 
   auto it = gd->anims.find(toLowerAscii(po.currentAnim));
-  if (it == gd->anims.end() || it->second.frames.empty()) return;
+  if (it == gd->anims.end() || it->second.frames.empty()) {
+    it = gd->anims.find("ms");
+    if (it == gd->anims.end() || it->second.frames.empty()) return;
+  }
   const AnimationDef& anim = it->second;
   int idx = std::clamp(po.animFrame, 0, (int)anim.frames.size() - 1);
   const AnimFrame& fr = anim.frames[idx];
@@ -3745,6 +3748,32 @@ int GameEngine::run() {
           break;
         }
       }
+    }
+
+    const bool fastSim = !opts_.screenshot.empty() || !opts_.recordDir.empty();
+    if (fastSim) {
+      tickSimulation();
+      simulatedTicks++;
+
+      if (!opts_.recordDir.empty()) {
+        fs::create_directories(pathFromUtf8(opts_.recordDir));
+        if (simulatedTicks == 1 || (simulatedTicks % opts_.recordStride) == 0) {
+          render();
+          char frameBuf[64];
+          std::snprintf(frameBuf, sizeof frameBuf, "/frame_%05d.png", simulatedTicks);
+          saveScreenshot(opts_.recordDir + frameBuf);
+        }
+      }
+
+      if (simulatedTicks >= opts_.screenshotTicks) {
+        if (!opts_.screenshot.empty()) {
+          render();
+          saveScreenshot(opts_.screenshot);
+        }
+        running_ = false;
+        break;
+      }
+      continue;
     }
 
     uint32_t now = SDL_GetTicks();

@@ -3,6 +3,7 @@
 #include <SDL.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 
 #include "core/platform.h"
@@ -23,6 +24,9 @@ int main(int argc, char** argv) {
       opts.startInLevel = true;
     } else if (a == "--screen" && hasNext) opts.initialScreen = args[++i];
     else if (a == "--screenshot" && hasNext) opts.screenshot = args[++i];
+    else if (a == "--ticks" && hasNext) opts.screenshotTicks = std::atoi(args[++i].c_str());
+    else if (a == "--record-dir" && hasNext) opts.recordDir = args[++i];
+    else if (a == "--stride" && hasNext) opts.recordStride = std::max(1, std::atoi(args[++i].c_str()));
     else if (a == "-h" || a == "--help") {
       std::printf(
           "OpenNFH — Neighbours from Hell 1 engine\n"
