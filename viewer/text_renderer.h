@@ -29,6 +29,10 @@ class TextRenderer {
   // Draws text, returns its width. Optional `maxWidth` clips the texture.
   int draw(const std::string& s, int x, int y, SDL_Color c, int maxWidth = 0);
 
+  // halign: -1=left, 0=center, 1=right; valign: -1=top, 0=center, 1=bottom
+  void drawAligned(const std::string& s, const SDL_Rect& box, SDL_Color c, int halign = 0, int valign = 0);
+  void drawWrapped(const std::string& s, const SDL_Rect& box, SDL_Color c, int halign = -1, int valign = -1);
+
   void clearCache();
   void close();
 

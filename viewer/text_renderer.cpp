@@ -95,4 +95,81 @@ int TextRenderer::draw(const std::string& s, int x, int y, SDL_Color c, int maxW
   return w;
 }
 
+void TextRenderer::drawAligned(const std::string& s, const SDL_Rect& box, SDL_Color c, int halign, int valign) {
+  Cached* e = get(s, c);
+  if (!e) return;
+  int w = std::min(e->w, std::max(1, box.w));
+  int h = e->h;
+  int x = box.x;
+  if (halign == 0) x = box.x + (box.w - w) / 2;
+  else if (halign > 0) x = box.x + box.w - w;
+
+  int y = box.y;
+  if (valign == 0) y = box.y + (box.h - h) / 2;
+  else if (valign > 0) y = box.y + box.h - h;
+
+  SDL_Rect src{0, 0, w, h};
+  SDL_Rect dst{x, y, w, h};
+  SDL_RenderCopy(r_, e->tex, &src, &dst);
+}
+
+void TextRenderer::drawWrapped(const std::string& s, const SDL_Rect& box, SDL_Color c, int halign, int valign) {
+  if (!font_ || s.empty() || box.w <= 0 || box.h <= 0) return;
+  std::vector<std::string> lines;
+  size_t pos = 0;
+  while (pos <= s.size()) {
+    size_t nl = s.find('\n', pos);
+    std::string para = (nl == std::string::npos) ? s.substr(pos) : s.substr(pos, nl - pos);
+    if (!para.empty() && para.back() == '\r') para.pop_back();
+
+    // Trim spaces-only paragraph to an empty line
+    bool onlySpaces = true;
+    for (char ch : para) {
+      if (ch != ' ' && ch != '\t') {
+        onlySpaces = false;
+        break;
+      }
+    }
+    if (onlySpaces) {
+      lines.emplace_back();
+    } else {
+      std::string curLine;
+      size_t wpos = 0;
+      while (wpos < para.size()) {
+        while (wpos < para.size() && para[wpos] == ' ') ++wpos;
+        if (wpos >= para.size()) break;
+        size_t wend = para.find(' ', wpos);
+        std::string word = (wend == std::string::npos) ? para.substr(wpos) : para.substr(wpos, wend - wpos);
+        std::string candidate = curLine.empty() ? word : (curLine + " " + word);
+        if (!curLine.empty() && width(candidate) > box.w) {
+          lines.push_back(curLine);
+          curLine = word;
+        } else {
+          curLine = std::move(candidate);
+        }
+        if (wend == std::string::npos) break;
+        wpos = wend + 1;
+      }
+      if (!curLine.empty()) lines.push_back(curLine);
+    }
+
+    if (nl == std::string::npos) break;
+    pos = nl + 1;
+  }
+
+  int lh = std::max(14, lineHeight());
+  int totalH = (int)lines.size() * lh;
+  int startY = box.y;
+  if (valign == 0) startY = box.y + std::max(0, (box.h - totalH) / 2);
+  else if (valign > 0) startY = box.y + std::max(0, box.h - totalH);
+
+  for (size_t i = 0; i < lines.size(); ++i) {
+    int y = startY + (int)i * lh;
+    if (y + lh > box.y + box.h + 4) break;
+    if (lines[i].empty()) continue;
+    SDL_Rect lineBox{box.x, y, box.w, lh};
+    drawAligned(lines[i], lineBox, c, halign, -1);
+  }
+}
+
 }  // namespace nfh

@@ -4,11 +4,14 @@
 #include <cmath>
 #include <cstdio>
 #include <queue>
+#include <sstream>
 #include <unordered_set>
 
 #include "core/platform.h"
 #include "core/png_writer.h"
+#include "core/text.h"
 #include "core/tga.h"
+#include "core/xml.h"
 
 namespace nfh {
 
@@ -44,6 +47,8 @@ GameEngine::~GameEngine() {
   fontUI_.close();
   fontBig_.close();
   fontHud_.close();
+  fontSmall_.close();
+  fontTitle_.close();
   if (audioOk_) Mix_CloseAudio();
   Mix_Quit();
   if (ren_) SDL_DestroyRenderer(ren_);
@@ -67,8 +72,8 @@ bool GameEngine::init(const GameOptions& opts) {
   if (audioOk_) Mix_AllocateChannels(16);
 
   SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
-  window_ = SDL_CreateWindow("OpenNFH — Как достать соседа", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, winW_, winH_,
-                             SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
+  window_ = SDL_CreateWindow("OpenNFH — Как достать соседа: Сладкая месть", SDL_WINDOWPOS_CENTERED,
+                             SDL_WINDOWPOS_CENTERED, winW_, winH_, SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
   if (!window_) return false;
   ren_ = SDL_CreateRenderer(window_, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
   if (!ren_) ren_ = SDL_CreateRenderer(window_, -1, SDL_RENDERER_SOFTWARE);
@@ -87,10 +92,11 @@ bool GameEngine::init(const GameOptions& opts) {
   }
   if (!opts.gamePath.empty()) GameData::rememberPath(exeDir, gamePath);
 
-  // Load fonts (prefer original game's acmesa.TTF for numbers, system font for full Cyrillic including 'ё')
   auto sysFonts = systemFonts();
-  fontUI_.load(ren_, sysFonts, 16);
+  fontSmall_.load(ren_, sysFonts, 14);
+  fontUI_.load(ren_, sysFonts, 17);
   fontBig_.load(ren_, sysFonts, 22);
+  fontTitle_.load(ren_, sysFonts, 28);
   std::vector<uint8_t> ttfData;
   if (gd_->read("loose/bluehigh.ttf", ttfData)) {
     fontHud_.loadFromMemory(ren_, ttfData, 26);
@@ -104,6 +110,10 @@ bool GameEngine::init(const GameOptions& opts) {
     return false;
   }
 
+  loadMenuData();
+  loadUserProgress();
+  applyAudioVolumes();
+
   int startIdx = 0;
   for (size_t i = 0; i < levels_.size(); ++i) {
     if (toLowerAscii(levels_[i].name) == toLowerAscii(opts.levelName)) {
@@ -111,8 +121,34 @@ bool GameEngine::init(const GameOptions& opts) {
       break;
     }
   }
+  previewLevelIdx_ = startIdx;
   if (!selectLevel(startIdx)) return false;
-  startMusic("sfx/music/ingame1_slow.mp3");
+
+  const std::string scr = toLowerAscii(opts.initialScreen);
+  if (scr == "mainmenu" || scr == "menu") {
+    enterScreen(ScreenState::MainMenu);
+  } else if (scr == "episodes" || scr == "newgame") {
+    enterScreen(ScreenState::EpisodeSelect);
+  } else if (scr == "options") {
+    optionsReturnScreen_ = ScreenState::MainMenu;
+    enterScreen(ScreenState::Options);
+  } else if (scr == "pause") {
+    enterScreen(ScreenState::PauseMenu);
+  } else if (scr == "credits") {
+    enterScreen(ScreenState::Credits);
+  } else if (scr == "summary" || scr == "gameover") {
+    quota_ = 85;
+    tricksDone_ = level_.info.reachable;
+    finishEpisode(false, false);
+  } else if (scr == "victory") {
+    completedSeason_ = 1;
+    seasonTrophyTier_ = 3;
+    enterScreen(ScreenState::SeasonVictory);
+  } else if (opts.startInLevel || !opts.screenshot.empty()) {
+    enterScreen(ScreenState::InGame);
+  } else {
+    enterScreen(ScreenState::MainMenu);
+  }
   return true;
 }
 
@@ -145,7 +181,7 @@ void GameEngine::clearTextures() {
 }
 
 void GameEngine::playSfx(const std::string& sfxPath) {
-  if (!audioOk_ || sfxPath.empty()) return;
+  if (!audioOk_ || muteMaster_ || sfxPath.empty()) return;
   std::string vpath = sfxPath;
   if (toLowerAscii(vpath).rfind("sfx/", 0) == 0 && !gd_->find(vpath)) {
     vpath = "sfx/" + vpath;  // "sfx/wod_step1a.wav" -> "sfx/sfx/wod_step1a.wav"
@@ -166,20 +202,231 @@ void GameEngine::playSfx(const std::string& sfxPath) {
 }
 
 void GameEngine::startMusic(const std::string& musicVpath) {
-  if (!audioOk_) return;
+  if (!audioOk_ || musicVpath.empty()) return;
+  if (toLowerAscii(currentMusicVpath_) == toLowerAscii(musicVpath) && music_) return;
+  currentMusicVpath_ = musicVpath;
   if (music_) {
     Mix_FreeMusic(music_);
     music_ = nullptr;
   }
   if (gd_->read(musicVpath, musicMem_)) {
     music_ = Mix_LoadMUS_RW(SDL_RWFromConstMem(musicMem_.data(), (int)musicMem_.size()), 1);
-    if (music_) Mix_PlayMusic(music_, -1);
+    if (music_) {
+      applyAudioVolumes();
+      Mix_PlayMusic(music_, -1);
+    }
   }
+}
+
+void GameEngine::applyAudioVolumes() {
+  if (!audioOk_) return;
+  int sfxVol = muteMaster_ ? 0 : (masterVolume_ * MIX_MAX_VOLUME / 100);
+  int musVol = (muteMaster_ || muteMusic_) ? 0 : (musicVolume_ * masterVolume_ * MIX_MAX_VOLUME / 10000);
+  Mix_Volume(-1, std::clamp(sfxVol, 0, MIX_MAX_VOLUME));
+  Mix_VolumeMusic(std::clamp(musVol, 0, MIX_MAX_VOLUME));
+}
+
+void GameEngine::loadMenuData() {
+  auto parseStringsFile = [&](const std::string& vpath) {
+    std::vector<uint8_t> raw;
+    if (!gd_->read(vpath, raw)) return;
+    XmlDocument doc = parseXml(decodeToUtf8(raw));
+    const XmlNode* root = doc.root.child("strings");
+    if (!root) root = &doc.root;
+    for (const XmlNode* c : root->childrenNamed("string")) {
+      std::string name = toLowerAscii(c->attrOr("name"));
+      std::string cat = toLowerAscii(c->attrOr("category"));
+      std::string txt = c->attrOr("text");
+      if (cat == "statusbar") {
+        statusStrings_[name] = txt;
+      } else if (cat == "gameover") {
+        menuStrings_["gameover_" + name] = txt;
+      } else {
+        menuStrings_[name] = txt;
+      }
+    }
+  };
+  parseStringsFile("gamedata/generic/strings.xml");
+  parseStringsFile("gamedata/mainmenu/strings.xml");
+
+  struct BtnMeta {
+    const char* levelName;
+    const char* shortName;
+    int x;
+    int y;
+  };
+  static const BtnMeta kBtns[] = {
+      {"tutorial_1", "tut1", 25, 86},       {"tutorial_2", "tut2", 112, 86},
+      {"tutorial_3", "tut3", 199, 86},      {"level_peep", "peep", 25, 185},
+      {"level_sofa", "sofa", 112, 185},     {"level_mail", "mail", 199, 185},
+      {"level_pie", "pie", 286, 185},       {"level_piano", "piano", 25, 249},
+      {"level_bath", "bath", 112, 249},     {"level_art", "art", 25, 348},
+      {"level_suntan", "suntan", 112, 348}, {"level_pig", "pig", 199, 348},
+      {"level_barbecue", "barbecue", 286, 348},
+      {"level_laundry", "laundry", 25, 447},{"level_fitness", "fitness", 112, 447},
+      {"level_DIY", "diy", 199, 447},       {"level_hunter", "hunter", 286, 447},
+  };
+
+  briefings_.resize(levels_.size());
+  for (size_t i = 0; i < levels_.size(); ++i) {
+    BriefingInfo& b = briefings_[i];
+    b.title = levels_[i].name;
+    b.buttonShortName = "peep";
+    for (const auto& m : kBtns) {
+      if (toLowerAscii(levels_[i].name) == toLowerAscii(m.levelName)) {
+        b.buttonShortName = m.shortName;
+        b.menuX = m.x;
+        b.menuY = m.y;
+        break;
+      }
+    }
+
+    std::vector<uint8_t> raw;
+    if (gd_->read("gamedata/dialogs/briefing/" + levels_[i].name + ".xml", raw)) {
+      XmlDocument doc = parseXml(decodeToUtf8(raw));
+      const XmlNode* root = doc.root.child("strings");
+      if (!root) root = &doc.root;
+      for (const XmlNode* c : root->childrenNamed("string")) {
+        std::string n = toLowerAscii(c->attrOr("name"));
+        std::string t = c->attrOr("text");
+        if (n == "title") b.title = t;
+        else if (n == "hinttext") b.hintText = t;
+        else if (n == "pictext") b.picText = t;
+        else if (n == "briefing") b.briefing = t;
+      }
+    }
+  }
+
+  creditsLines_.clear();
+  creditsLines_.push_back({"OpenNFH — Кроссплатформенный движок (C++17 / SDL2)", true});
+  creditsLines_.push_back({"Как достать соседа: Сладкая месть", false});
+  creditsLines_.push_back({"", false});
+  std::vector<uint8_t> craw;
+  if (gd_->read("gamedata/dialogs/creditstext.xml", craw)) {
+    XmlDocument doc = parseXml(decodeToUtf8(craw));
+    const XmlNode* root = doc.root.child("strings");
+    if (!root) root = &doc.root;
+    for (const XmlNode* c : root->childrenNamed("string")) {
+      std::string txt = c->attrOr("text");
+      std::string nm = c->attrOr("name");
+      bool isHeader = (!nm.empty() && nm.back() == 'a');
+      creditsLines_.push_back({txt, isHeader});
+    }
+  }
+}
+
+void GameEngine::loadUserProgress() {
+  const fs::path savePath = executableDir() / "opennfh_save.cfg";
+  std::vector<uint8_t> raw;
+  if (!readWholeFile(savePath, raw)) return;
+  std::string content(reinterpret_cast<const char*>(raw.data()), raw.size());
+  std::istringstream iss(content);
+  std::string line;
+  while (std::getline(iss, line)) {
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (line.empty() || line[0] == '#') continue;
+    size_t eq = line.find('=');
+    if (eq == std::string::npos) continue;
+    std::string k = line.substr(0, eq);
+    std::string v = line.substr(eq + 1);
+    if (k == "masterVolume") masterVolume_ = std::clamp(std::atoi(v.c_str()), 0, 100);
+    else if (k == "musicVolume") musicVolume_ = std::clamp(std::atoi(v.c_str()), 0, 100);
+    else if (k == "muteMaster") muteMaster_ = (v == "1");
+    else if (k == "muteMusic") muteMusic_ = (v == "1");
+    else if (k == "highQuality") optHighQuality_ = (v == "1");
+    else if (k == "timeLimit") optTimeLimit_ = (v == "1");
+    else if (k == "autoScroll") optAutoScroll_ = (v == "1");
+    else if (k == "coloredCursor") optColoredCursor_ = (v == "1");
+    else if (k.rfind("level.", 0) == 0) {
+      std::string lv = toLowerAscii(k.substr(6));
+      size_t comma = v.find(',');
+      if (comma != std::string::npos) {
+        LevelProgress lp;
+        lp.bestQuota = std::atoi(v.substr(0, comma).c_str());
+        lp.bestTricks = std::atoi(v.substr(comma + 1).c_str());
+        lp.completed = lp.bestQuota > 0;
+        progress_[lv] = lp;
+      }
+    }
+  }
+}
+
+void GameEngine::saveUserProgress() const {
+  const fs::path savePath = executableDir() / "opennfh_save.cfg";
+  std::ostringstream oss;
+  oss << "# OpenNFH user profile & settings\n";
+  oss << "masterVolume=" << masterVolume_ << "\n";
+  oss << "musicVolume=" << musicVolume_ << "\n";
+  oss << "muteMaster=" << (muteMaster_ ? 1 : 0) << "\n";
+  oss << "muteMusic=" << (muteMusic_ ? 1 : 0) << "\n";
+  oss << "highQuality=" << (optHighQuality_ ? 1 : 0) << "\n";
+  oss << "timeLimit=" << (optTimeLimit_ ? 1 : 0) << "\n";
+  oss << "autoScroll=" << (optAutoScroll_ ? 1 : 0) << "\n";
+  oss << "coloredCursor=" << (optColoredCursor_ ? 1 : 0) << "\n";
+  for (const auto& kv : progress_) {
+    oss << "level." << kv.first << "=" << kv.second.bestQuota << "," << kv.second.bestTricks << "\n";
+  }
+  std::string out = oss.str();
+  writeWholeFile(savePath, reinterpret_cast<const uint8_t*>(out.data()), out.size());
+}
+
+void GameEngine::resetUserProgress() {
+  progress_.clear();
+  saveUserProgress();
+}
+
+void GameEngine::enterScreen(ScreenState st) {
+  screen_ = st;
+  confirmAction_ = ConfirmAction::None;
+  selectedInv_ = -1;
+  hoverText_.clear();
+  cursorVpath_ = "gfx/cursor/normal.tga";
+
+  if (st == ScreenState::MainMenu || st == ScreenState::EpisodeSelect || st == ScreenState::Options ||
+      st == ScreenState::Credits) {
+    startMusic("sfx/music/titel.mp3");
+  } else if (st == ScreenState::InGame) {
+    std::string setLow = toLowerAscii(level_.info.setName);
+    startMusic((setLow == "set02" || setLow == "set03") ? "sfx/music/ingame2_normal.mp3" : "sfx/music/ingame1_slow.mp3");
+  }
+
+  if (st == ScreenState::Options) {
+    bakMasterVolume_ = masterVolume_;
+    bakMusicVolume_ = musicVolume_;
+    bakMuteMaster_ = muteMaster_;
+    bakMuteMusic_ = muteMusic_;
+    bakHighQuality_ = optHighQuality_;
+    bakTimeLimit_ = optTimeLimit_;
+    bakAutoScroll_ = optAutoScroll_;
+    bakColoredCursor_ = optColoredCursor_;
+  } else if (st == ScreenState::Credits) {
+    creditsScrollY_ = 540.0f;
+  }
+}
+
+void GameEngine::finishEpisode(bool timeExpired, bool caughtOut) {
+  summaryTimeExpired_ = timeExpired;
+  summarySuccess_ = !timeExpired && !caughtOut && (quota_ >= level_.info.minQuota);
+  summaryPerfect_ = summarySuccess_ && (tricksDone_ >= level_.info.reachable);
+
+  if (summarySuccess_) {
+    std::string key = toLowerAscii(level_.info.name);
+    LevelProgress& lp = progress_[key];
+    lp.completed = true;
+    if (quota_ > lp.bestQuota) lp.bestQuota = quota_;
+    if (tricksDone_ > lp.bestTricks) lp.bestTricks = tricksDone_;
+    if (summaryPerfect_) lp.perfect = true;
+    saveUserProgress();
+  }
+
+  playSfx(summaryPerfect_ ? "sfx/applause2.wav" : (summarySuccess_ ? "sfx/applause1.wav" : "sfx/boo1.wav"));
+  enterScreen(ScreenState::LevelSummary);
 }
 
 bool GameEngine::selectLevel(int index) {
   if (levels_.empty()) return false;
   currentLevelIdx_ = (index % (int)levels_.size() + (int)levels_.size()) % (int)levels_.size();
+  previewLevelIdx_ = currentLevelIdx_;
   std::string err;
   if (!loadLevel(*gd_, levels_[currentLevelIdx_], level_, &err)) {
     std::fprintf(stderr, "loadLevel failed: %s\n", err.c_str());
@@ -202,6 +449,7 @@ bool GameEngine::selectLevel(int index) {
   remainingTicks_ = level_.info.timeTicks;
   catchSequenceActive_ = false;
   catchTicks_ = 0;
+  catchesCount_ = 0;
 
   // Initialize actors from spawns
   woody_ = ActorState{"woody", "fro", Point{110, 218}, 4, 2, false, -1, "ms2", "ms2", 0};
@@ -231,11 +479,11 @@ bool GameEngine::selectLevel(int index) {
 
   buildNeighborRoutine();
 
-  std::string title = "OpenNFH — " + level_.info.name + "  (мин. рейтинг: " + std::to_string(level_.info.minQuota) +
-                      "%, пакостей: " + std::to_string(level_.info.reachable) + ")";
+  std::string epTitle = (currentLevelIdx_ < (int)briefings_.size()) ? briefings_[currentLevelIdx_].title : level_.info.name;
+  std::string title = "OpenNFH — " + epTitle + " [" + level_.info.name + "]";
   SDL_SetWindowTitle(window_, title.c_str());
-  statusBanner_ = "Уровень: " + level_.info.name + "  ([ / ] — сменить уровень, V — камера, R — рестарт)";
-  bannerTicks_ = kTicksPerSecond * 5;
+  statusBanner_ = "Серия: «" + epTitle + "»  (Esc — меню, V — камера, R — рестарт)";
+  bannerTicks_ = kTicksPerSecond * 4;
   return true;
 }
 
@@ -467,22 +715,32 @@ void GameEngine::updateHover(int worldX, int worldY, int screenX, int screenY) {
   hoveredRoom_.clear();
   hoverText_.clear();
   cursorVpath_ = "gfx/cursor/normal.tga";
+  if (screen_ != ScreenState::InGame) return;
 
   // Check if mouse is over bottom HUD
-  if (screenY >= winH_ - 110) {
+  if (screenY >= winH_ - 130) {
     int hudLeft = (winW_ - 800) / 2;
-    for (int slot = 0; slot < 5; ++slot) {
-      int idx = invScroll_ + slot;
-      if (idx >= (int)inventory_.size()) break;
-      Rect r{hudLeft + 123 + 41 + slot * 75, winH_ - 89 + 26, 60, 55};
-      if (r.contains(screenX, screenY)) {
-        std::string itemName = level_.getString(inventory_[idx], "name");
-        hoverText_ = itemName.empty() ? inventory_[idx] : itemName;
-        cursorVpath_ = "gfx/cursor/use.tga";
-        return;
-      }
+    int hudTop = winH_ - 600;
+    Rect missionBtn{hudLeft + 581 + 167, hudTop + 471 + 20, 48, 36};
+    if (missionBtn.contains(screenX, screenY)) {
+      hoverText_ = "Игровое меню (Esc)";
+      cursorVpath_ = "gfx/cursor/use.tga";
+      return;
     }
-    return;
+    if (screenY >= winH_ - 110) {
+      for (int slot = 0; slot < 5; ++slot) {
+        int idx = invScroll_ + slot;
+        if (idx >= (int)inventory_.size()) break;
+        Rect r{hudLeft + 123 + 41 + slot * 75, winH_ - 89 + 26, 60, 55};
+        if (r.contains(screenX, screenY)) {
+          std::string itemName = level_.getString(inventory_[idx], "name");
+          hoverText_ = itemName.empty() ? inventory_[idx] : itemName;
+          cursorVpath_ = "gfx/cursor/use.tga";
+          return;
+        }
+      }
+      return;
+    }
   }
 
   const std::string heldItem = (selectedInv_ >= 0 && selectedInv_ < (int)inventory_.size()) ? inventory_[selectedInv_] : std::string();
@@ -678,19 +936,40 @@ void GameEngine::onLeftClick(int worldX, int worldY, int screenX, int screenY, b
   if (catchSequenceActive_) return;
 
   // Check HUD clicks first
-  if (screenY >= winH_ - 110) {
+  if (screenY >= winH_ - 130) {
     int hudLeft = (winW_ - 800) / 2;
-    for (int slot = 0; slot < 5; ++slot) {
-      int idx = invScroll_ + slot;
-      if (idx >= (int)inventory_.size()) break;
-      Rect r{hudLeft + 123 + 41 + slot * 75, winH_ - 89 + 26, 60, 55};
-      if (r.contains(screenX, screenY)) {
-        selectedInv_ = (selectedInv_ == idx) ? -1 : idx;
-        playSfx("sfx/but1.wav");
-        return;
-      }
+    int hudTop = winH_ - 600;
+    Rect missionBtn{hudLeft + 581 + 167, hudTop + 471 + 20, 48, 36};
+    if (missionBtn.contains(screenX, screenY)) {
+      playSfx("sfx/but1.wav");
+      enterScreen(ScreenState::PauseMenu);
+      return;
     }
-    return;
+    Rect leftArr{hudLeft + 123, hudTop + 547, 36, 36};
+    Rect rightArr{hudLeft + 123 + 422, hudTop + 547, 36, 36};
+    if (leftArr.contains(screenX, screenY)) {
+      if (invScroll_ > 0) invScroll_--;
+      playSfx("sfx/but1.wav");
+      return;
+    }
+    if (rightArr.contains(screenX, screenY)) {
+      if (invScroll_ + 5 < (int)inventory_.size()) invScroll_++;
+      playSfx("sfx/but1.wav");
+      return;
+    }
+    if (screenY >= winH_ - 110) {
+      for (int slot = 0; slot < 5; ++slot) {
+        int idx = invScroll_ + slot;
+        if (idx >= (int)inventory_.size()) break;
+        Rect r{hudLeft + 123 + 41 + slot * 75, winH_ - 89 + 26, 60, 55};
+        if (r.contains(screenX, screenY)) {
+          selectedInv_ = (selectedInv_ == idx) ? -1 : idx;
+          playSfx("sfx/but1.wav");
+          return;
+        }
+      }
+      return;
+    }
   }
 
   // Preserve active non-interruptible step (e.g. mid-door traversal or mid-hideout exit/entry)
@@ -756,6 +1035,12 @@ void GameEngine::onLeftClick(int worldX, int worldY, int screenX, int screenY, b
   if (hoveredObject_ >= 0) {
     const PlacedObject& po = level_.objects[hoveredObject_];
     const ObjectDef* od = level_.findObjectDef(po.name);
+
+    // Exit door (hal/door_entrance) when minimum quota has been reached finishes the episode!
+    if (od && toLowerAscii(od->stdAction) == "end" && quota_ >= level_.info.minQuota) {
+      finishEpisode(false, false);
+      return;
+    }
 
     // Door click: navigate to the connected room
     if (po.isDoor) {
@@ -1856,6 +2141,11 @@ void GameEngine::checkStealthDetection() {
     advanceActorAnim(neighbor_);
     if (catchTicks_ <= 0) {
       catchSequenceActive_ = false;
+      catchesCount_++;
+      if (catchesCount_ >= 3) {
+        finishEpisode(false, true);
+        return;
+      }
       woody_.room = "fro";
       woody_.pos = Point{105, 218};
       woody_.hidden = false;
@@ -1888,21 +2178,43 @@ void GameEngine::checkStealthDetection() {
   playSfx("sfx/wod_fear1.wav");
   playSfx("sfx/na_beats1.wav");
   playSfx("sfx/wod_au1.wav");
-  statusBanner_ = "СОСЕД ПОЙМАЛ ВУДИ! Возвращаемся на крыльцо...";
+  statusBanner_ = "СОСЕД ПОЙМАЛ ВУДИ! (" + std::to_string(catchesCount_ + 1) + "/3)";
   bannerTicks_ = kTicksPerSecond * 3;
 }
 
 void GameEngine::tickSimulation() {
-  if (paused_) return;
+  if (screen_ == ScreenState::Credits) {
+    creditsScrollY_ -= 2.2f;
+    float totalH = float(creditsLines_.size()) * 28.0f + 560.0f;
+    if (creditsScrollY_ < -totalH) creditsScrollY_ = 540.0f;
+    return;
+  }
+
+  if (screen_ != ScreenState::InGame || paused_) return;
   if (bannerTicks_ > 0) bannerTicks_--;
   if (angerTicks_ > 0) angerTicks_--;
-  if (remainingTicks_ > 0) remainingTicks_--;
+  if (optTimeLimit_ && level_.info.timeTicks > 0) {
+    if (remainingTicks_ > 0) remainingTicks_--;
+    if (remainingTicks_ <= 0) {
+      finishEpisode(true, false);
+      return;
+    }
+  }
 
   advanceObjectAnims();
   checkStealthDetection();
+  if (screen_ != ScreenState::InGame) return;
   if (!catchSequenceActive_) {
     updateWoody();
     updateNeighbor();
+  }
+
+  // Auto-finish episode once all tricks have been performed and Neighbor finished reacting
+  if (level_.info.reachable > 0 && tricksDone_ >= level_.info.reachable && !catchSequenceActive_) {
+    bool neighborPlayingPrank = (!neighborQueue_.empty() && neighborQueue_.front().type == TaskStep::Type::PlayAction);
+    if (!neighborPlayingPrank) {
+      finishEpisode(false, false);
+    }
   }
 }
 
@@ -1916,6 +2228,54 @@ Point GameEngine::screenToWorld(int sx, int sy) const {
 
 SDL_FRect GameEngine::worldToScreen(float wx, float wy, float ww, float wh) const {
   return SDL_FRect{camX_ + wx * camZoom_, camY_ + wy * camZoom_, ww * camZoom_, wh * camZoom_};
+}
+
+float GameEngine::menuScale() const {
+  return std::min(float(winW_) / 800.0f, float(winH_) / 600.0f);
+}
+
+Point GameEngine::screenToMenu(int sx, int sy) const {
+  float s = menuScale();
+  float ox = (winW_ - 800.0f * s) * 0.5f;
+  float oy = (winH_ - 600.0f * s) * 0.5f;
+  return Point{int(std::round((sx - ox) / s)), int(std::round((sy - oy) / s))};
+}
+
+SDL_Rect GameEngine::menuRect(int x, int y, int w, int h) const {
+  float s = menuScale();
+  float ox = (winW_ - 800.0f * s) * 0.5f;
+  float oy = (winH_ - 600.0f * s) * 0.5f;
+  return SDL_Rect{int(std::round(ox + x * s)), int(std::round(oy + y * s)),
+                  std::max(1, int(std::round(w * s))), std::max(1, int(std::round(h * s)))};
+}
+
+void GameEngine::drawMenuImage(const std::string& vpath, int x, int y) {
+  if (const TexEntry* t = getTexture(vpath)) {
+    SDL_Rect dst = menuRect(x, y, t->w, t->h);
+    SDL_RenderCopy(ren_, t->tex, nullptr, &dst);
+  }
+}
+
+bool GameEngine::drawMenuButton(const std::string& stdImg, const std::string& hovImg, const std::string& downImg,
+                                int x, int y, int w, int h, const std::string& caption, TextRenderer& font,
+                                SDL_Color stdColor, SDL_Color hovColor, Point menuMouse, bool mouseDown,
+                                bool* outHovered) {
+  const TexEntry* tStd = getTexture(stdImg);
+  int bw = w > 0 ? w : (tStd ? tStd->w : 100);
+  int bh = h > 0 ? h : (tStd ? tStd->h : 40);
+  bool hovered = (confirmAction_ == ConfirmAction::None) && Rect{x, y, bw, bh}.contains(menuMouse.x, menuMouse.y);
+  if (outHovered) *outHovered = hovered;
+
+  const std::string& chosenImg = hovered ? (mouseDown && !downImg.empty() ? downImg : (hovImg.empty() ? stdImg : hovImg)) : stdImg;
+  if (const TexEntry* t = getTexture(chosenImg)) {
+    SDL_Rect dst = menuRect(x, y, t->w, t->h);
+    SDL_RenderCopy(ren_, t->tex, nullptr, &dst);
+  }
+  if (!caption.empty()) {
+    SDL_Rect textBox = menuRect(x + 8, y + (hovered && mouseDown ? 2 : 0), bw - 16, bh);
+    font.drawAligned(caption, textBox, hovered ? hovColor : stdColor, 0, 0);
+  }
+  return hovered;
 }
 
 void GameEngine::renderObject(const PlacedObject& po) {
@@ -2115,10 +2475,16 @@ void GameEngine::renderHud() {
     }
   }
 
-  // Right: TV panel (timer, quota %, tricks count)
+  // Right: TV panel (timer, quota %, tricks count, and interactive Mission/Menu button)
   drawGui("gfx/gui/ingame/interface_right.tga", 581, 471);
+  Rect missionBtn{hudX + 581 + 167, hudY + 471 + 20, 48, 36};
+  bool missionHov = missionBtn.contains(mouseX_, mouseY_);
+  drawGui(missionHov ? (mouseLeftDown_ ? "gfx/gui/ingame/mission_pressed.tga" : "gfx/gui/ingame/mission_hover.tga")
+                     : "gfx/gui/ingame/mission_normal.tga",
+          581 + 167, 471 + 20);
+
   char timeBuf[32];
-  if (level_.info.timeTicks <= 0) {
+  if (!optTimeLimit_ || level_.info.timeTicks <= 0) {
     std::snprintf(timeBuf, sizeof timeBuf, "--:--");
   } else {
     int secs = std::max(0, remainingTicks_ / kTicksPerSecond);
@@ -2147,9 +2513,615 @@ void GameEngine::renderHud() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Original Menu & Dialog Rendering (800x600 virtual coordinate space)
+// ---------------------------------------------------------------------------
+
+void GameEngine::renderMainMenu() {
+  Point mp = screenToMenu(mouseX_, mouseY_);
+  drawMenuImage("gfx/gui/main/mainmenu.tga", 0, 0);
+  drawMenuImage("gfx/gui/logo/logo_main.tga", 235, 15);
+
+  SDL_Color cStd{215, 215, 215, 255};
+  SDL_Color cHov{255, 255, 255, 255};
+  drawMenuButton("gfx/gui/main/mainmenu_btn3_hover.tga", "gfx/gui/main/mainmenu_btn3_hover.tga",
+                 "gfx/gui/main/mainmenu_btn3_pressed.tga", 248, 286, 333, 54,
+                 menuStrings_["mainmenu_start"].empty() ? "Начать игру" : menuStrings_["mainmenu_start"],
+                 fontBig_, cStd, cHov, mp, mouseLeftDown_);
+  drawMenuButton("gfx/gui/main/mainmenu_btn2_hover.tga", "gfx/gui/main/mainmenu_btn2_hover.tga",
+                 "gfx/gui/main/mainmenu_btn2_pressed.tga", 248, 341, 333, 54,
+                 menuStrings_["mainmenu_credits"].empty() ? "Авторы" : menuStrings_["mainmenu_credits"],
+                 fontBig_, cStd, cHov, mp, mouseLeftDown_);
+  drawMenuButton("gfx/gui/main/mainmenu_btn2_hover.tga", "gfx/gui/main/mainmenu_btn2_hover.tga",
+                 "gfx/gui/main/mainmenu_btn2_pressed.tga", 248, 396, 333, 54,
+                 menuStrings_["mainmenu_options"].empty() ? "Настройки" : menuStrings_["mainmenu_options"],
+                 fontBig_, cStd, cHov, mp, mouseLeftDown_);
+  drawMenuButton("gfx/gui/main/mainmenu_btn1_hover.tga", "gfx/gui/main/mainmenu_btn1_hover.tga",
+                 "gfx/gui/main/mainmenu_btn1_pressed.tga", 248, 451, 333, 54,
+                 menuStrings_["mainmenu_quit"].empty() ? "Выход" : menuStrings_["mainmenu_quit"],
+                 fontBig_, cStd, cHov, mp, mouseLeftDown_);
+
+  fontSmall_.drawAligned("OpenNFH v0.2.0 (Buka / JoWooD 1.11)", menuRect(12, 570, 770, 24),
+                         SDL_Color{230, 230, 230, 220}, -1, 1);
+}
+
+void GameEngine::renderBriefingRightPanel(int levelIdx, bool isInGameMenu) {
+  if (levels_.empty()) return;
+  levelIdx = std::clamp(levelIdx, 0, (int)levels_.size() - 1);
+  const LevelInfo& li = levels_[levelIdx];
+  const BriefingInfo& bi = briefings_[levelIdx];
+  Point mp = screenToMenu(mouseX_, mouseY_);
+
+  drawMenuImage("gfx/gui/main/newgameright.tga", 400, 0);
+
+  // Caption ("Описание серии")
+  std::string rightCap = menuStrings_["newgamerightcaption"].empty() ? "Описание серии" : menuStrings_["newgamerightcaption"];
+  fontBig_.drawAligned(rightCap, menuRect(400, 0, 375, 50), SDL_Color{255, 255, 255, 255}, 1, 0);
+
+  // Episode title
+  fontBig_.drawAligned(bi.title, menuRect(400 + 32, 61, 335, 53), SDL_Color{0, 0, 0, 255}, -1, 0);
+
+  // Level preview image
+  drawMenuImage("gfx/gui/main/" + li.name + ".tga", 400 + 28, 121);
+
+  // Min quota & Time limit
+  char qNum[16];
+  std::snprintf(qNum, sizeof qNum, "%d", li.minQuota);
+  fontBig_.drawAligned(qNum, menuRect(400 + 212, 147, 46, 26), SDL_Color{255, 255, 255, 255}, 1, 1);
+  fontSmall_.drawAligned("%", menuRect(400 + 260, 150, 18, 22), SDL_Color{255, 255, 255, 255}, -1, 1);
+  fontSmall_.drawAligned(menuStrings_["minquotacap"].empty() ? "Миним. оценка" : menuStrings_["minquotacap"],
+                         menuRect(400 + 187, 178, 88, 20), SDL_Color{255, 255, 255, 255}, 0, -1);
+
+  char tNum[16];
+  if (li.timeTicks <= 0) {
+    std::snprintf(tNum, sizeof tNum, "--");
+  } else {
+    int mins = (li.timeTicks / kTicksPerSecond) / 60;
+    std::snprintf(tNum, sizeof tNum, "%d", mins);
+  }
+  fontBig_.drawAligned(tNum, menuRect(400 + 290, 147, 50, 26), SDL_Color{255, 255, 255, 255}, 1, 1);
+  fontSmall_.drawAligned(menuStrings_["timeunit"].empty() ? "мин" : menuStrings_["timeunit"],
+                         menuRect(400 + 342, 150, 30, 22), SDL_Color{255, 255, 255, 255}, -1, 1);
+  fontSmall_.drawAligned(menuStrings_["timecap"].empty() ? "Время" : menuStrings_["timecap"],
+                         menuRect(400 + 282, 178, 88, 20), SDL_Color{255, 255, 255, 255}, 0, -1);
+
+  // Hint
+  fontUI_.drawAligned(menuStrings_["hinttitle"].empty() ? "Подсказка!" : menuStrings_["hinttitle"],
+                      menuRect(400 + 190, 202, 177, 22), SDL_Color{0, 96, 255, 255}, 0, 0);
+  fontSmall_.drawWrapped(bi.hintText, menuRect(400 + 190, 223, 177, 56), SDL_Color{0, 0, 0, 255}, 0, 0);
+
+  // Photo caption & Story briefing
+  fontSmall_.drawAligned(bi.picText, menuRect(400 + 28, 264, 155, 22), SDL_Color{0, 0, 0, 255}, -1, -1);
+  fontSmall_.drawWrapped(bi.briefing, menuRect(400 + 28, 287, 343, 178), SDL_Color{0, 0, 0, 255}, -1, -1);
+
+  // Record score for this episode
+  const LevelProgress& lp = progress_[toLowerAscii(li.name)];
+  fontUI_.drawAligned(menuStrings_["lastscoretitle"].empty() ? "Рекорд серии:" : menuStrings_["lastscoretitle"],
+                      menuRect(400 + 67, 475, 189, 23), SDL_Color{0, 0, 0, 255}, -1, 0);
+  fontSmall_.drawAligned(menuStrings_["lasttrickscap"].empty() ? "Пакостей" : menuStrings_["lasttrickscap"],
+                         menuRect(400 + 30, 499, 155, 23), SDL_Color{0, 0, 0, 255}, 0, 0);
+  char trRec[32];
+  std::snprintf(trRec, sizeof trRec, "%d / %d", lp.bestTricks, li.reachable);
+  fontUI_.drawAligned(trRec, menuRect(400 + 55, 521, 115, 24), SDL_Color{0, 0, 0, 255}, 0, 0);
+
+  fontSmall_.drawAligned(menuStrings_["lastquotacap"].empty() ? "Оценка" : menuStrings_["lastquotacap"],
+                         menuRect(400 + 191, 499, 63, 23), SDL_Color{0, 0, 0, 255}, 0, 0);
+  char qRec[32];
+  std::snprintf(qRec, sizeof qRec, "%d %%", lp.bestQuota);
+  fontUI_.drawAligned(qRec, menuRect(400 + 191, 521, 63, 24), SDL_Color{0, 0, 0, 255}, 0, 0);
+
+  // Play / Continue label & button
+  std::string actLabel = isInGameMenu ? (menuStrings_["continuetext"].empty() ? "Назад в игру" : menuStrings_["continuetext"])
+                                      : (menuStrings_["play"].empty() ? "Съемка" : menuStrings_["play"]);
+  fontUI_.drawWrapped(actLabel, menuRect(400 + 269, 475, 103, 55), SDL_Color{0, 0, 0, 255}, 0, 0);
+  drawMenuButton("gfx/gui/main/start_right_std.tga", "gfx/gui/main/start_right_hover.tga",
+                 "gfx/gui/main/start_right_pressed.tga", 400 + 320, 530, 0, 0, "", fontUI_,
+                 SDL_Color{}, SDL_Color{}, mp, mouseLeftDown_);
+}
+
+void GameEngine::renderEpisodeSelect() {
+  Point mp = screenToMenu(mouseX_, mouseY_);
+  drawMenuImage("gfx/gui/main/newgameleft.tga", 0, 0);
+
+  // Header & Season titles
+  fontBig_.drawAligned(menuStrings_["newgamecaption"].empty() ? "Список серий" : menuStrings_["newgamecaption"],
+                       menuRect(75, 0, 350, 50), SDL_Color{255, 255, 255, 255}, -1, 0);
+  fontUI_.drawAligned(menuStrings_["tutseason"].empty() ? "Пилотные серии" : menuStrings_["tutseason"],
+                      menuRect(46, 61, 342, 23), SDL_Color{0, 0, 0, 255}, -1, 0);
+  fontUI_.drawAligned(menuStrings_["season1"].empty() ? "Сезон 1" : menuStrings_["season1"],
+                      menuRect(46, 160, 342, 23), SDL_Color{0, 0, 0, 255}, -1, 0);
+  fontUI_.drawAligned(menuStrings_["season2"].empty() ? "Сезон 2" : menuStrings_["season2"],
+                      menuRect(46, 323, 342, 23), SDL_Color{0, 0, 0, 255}, -1, 0);
+  fontUI_.drawAligned(menuStrings_["season3"].empty() ? "Сезон 3" : menuStrings_["season3"],
+                      menuRect(46, 422, 342, 23), SDL_Color{0, 0, 0, 255}, -1, 0);
+
+  // Season trophy icons on the left margin
+  drawMenuImage("gfx/gui/main/briefingscreen_bronze.tga", 2, 150);
+  drawMenuImage("gfx/gui/main/briefingscreen_silver.tga", 2, 313);
+  drawMenuImage("gfx/gui/main/briefingscreen_gold.tga", 2, 412);
+
+  // 17 Episode buttons
+  for (size_t i = 0; i < levels_.size(); ++i) {
+    const LevelInfo& li = levels_[i];
+    const BriefingInfo& bi = briefings_[i];
+    const LevelProgress& lp = progress_[toLowerAscii(li.name)];
+    std::string stateTag = lp.perfect ? "perfect" : (lp.completed ? "passed" : "normal");
+    std::string base = "gfx/gui/main/button_" + bi.buttonShortName + "_" + stateTag;
+    std::string stdImg = base + ".tga";
+    std::string hovImg = base + "_hover.tga";
+    std::string prsImg = base + "_pressed.tga";
+
+    bool hovered = false;
+    drawMenuButton(stdImg, hovImg, prsImg, bi.menuX, bi.menuY, 75, 60, "", fontSmall_,
+                   SDL_Color{}, SDL_Color{}, mp, mouseLeftDown_, &hovered);
+
+    // Highlight selected episode button
+    if ((int)i == previewLevelIdx_) {
+      SDL_Rect sel = menuRect(bi.menuX - 2, bi.menuY - 2, 79, 64);
+      SDL_SetRenderDrawColor(ren_, 255, 215, 50, 235);
+      SDL_RenderDrawRect(ren_, &sel);
+    }
+
+    // Best score % badge at the bottom of the button
+    char scoreTxt[16];
+    std::snprintf(scoreTxt, sizeof scoreTxt, "%d %%", lp.bestQuota);
+    fontSmall_.drawAligned(scoreTxt, menuRect(bi.menuX, bi.menuY + 41, 75, 18),
+                           hovered ? SDL_Color{255, 255, 160, 255} : SDL_Color{255, 255, 255, 255}, 0, 0);
+  }
+
+  // Back to main menu button
+  fontUI_.drawAligned(menuStrings_["canceltext"].empty() ? "Вернуться в главное меню" : menuStrings_["canceltext"],
+                      menuRect(90, 521, 282, 25), SDL_Color{0, 0, 0, 255}, -1, 0);
+  drawMenuButton("gfx/gui/main/exit_std.tga", "gfx/gui/main/exit_hover.tga", "gfx/gui/main/exit_pressed.tga",
+                 25, 530, 0, 0, "", fontUI_, SDL_Color{}, SDL_Color{}, mp, mouseLeftDown_);
+
+  // Right panel: Briefing for selected episode
+  renderBriefingRightPanel(previewLevelIdx_, false);
+}
+
+void GameEngine::renderPauseMenu() {
+  Point mp = screenToMenu(mouseX_, mouseY_);
+  drawMenuImage("gfx/gui/main/ingamemenu_left.tga", 0, 0);
+
+  fontBig_.drawAligned(menuStrings_["mainmenuwhilegame_title"].empty() ? "Игровое меню" : menuStrings_["mainmenuwhilegame_title"],
+                       menuRect(32, 61, 335, 53), SDL_Color{0, 0, 0, 255}, -1, 0);
+
+  SDL_Color cStd{215, 215, 215, 255};
+  SDL_Color cHov{255, 255, 255, 255};
+  drawMenuButton("gfx/gui/main/mainmenu_btn3_hover.tga", "gfx/gui/main/mainmenu_btn3_hover.tga",
+                 "gfx/gui/main/mainmenu_btn3_pressed.tga", 33, 170, 333, 54,
+                 menuStrings_["mainmenu_back2game"].empty() ? "Продолжить игру" : menuStrings_["mainmenu_back2game"],
+                 fontBig_, cStd, cHov, mp, mouseLeftDown_);
+  drawMenuButton("gfx/gui/main/mainmenu_btn2_hover.tga", "gfx/gui/main/mainmenu_btn2_hover.tga",
+                 "gfx/gui/main/mainmenu_btn2_pressed.tga", 33, 225, 333, 54,
+                 menuStrings_["mainmenu_restart"].empty() ? "Начать съемку заново" : menuStrings_["mainmenu_restart"],
+                 fontBig_, cStd, cHov, mp, mouseLeftDown_);
+  drawMenuButton("gfx/gui/main/mainmenu_btn2_hover.tga", "gfx/gui/main/mainmenu_btn2_hover.tga",
+                 "gfx/gui/main/mainmenu_btn2_pressed.tga", 33, 280, 333, 54,
+                 menuStrings_["mainmenu_startnew"].empty() ? "Снимать новую серию" : menuStrings_["mainmenu_startnew"],
+                 fontBig_, cStd, cHov, mp, mouseLeftDown_);
+  drawMenuButton("gfx/gui/main/mainmenu_btn2_hover.tga", "gfx/gui/main/mainmenu_btn2_hover.tga",
+                 "gfx/gui/main/mainmenu_btn2_pressed.tga", 33, 335, 333, 54,
+                 menuStrings_["mainmenu_options"].empty() ? "Настройки" : menuStrings_["mainmenu_options"],
+                 fontBig_, cStd, cHov, mp, mouseLeftDown_);
+  drawMenuButton("gfx/gui/main/mainmenu_btn1_hover.tga", "gfx/gui/main/mainmenu_btn1_hover.tga",
+                 "gfx/gui/main/mainmenu_btn1_pressed.tga", 33, 390, 333, 54,
+                 menuStrings_["mainmenu_backtomain"].empty() ? "Вернуться в главное меню" : menuStrings_["mainmenu_backtomain"],
+                 fontBig_, cStd, cHov, mp, mouseLeftDown_);
+
+  renderBriefingRightPanel(currentLevelIdx_, true);
+}
+
+void GameEngine::renderOptionsScreen() {
+  Point mp = screenToMenu(mouseX_, mouseY_);
+  drawMenuImage("gfx/gui/main/optionsback.tga", 0, 0);
+
+  SDL_Color green{75, 255, 0, 255};
+  SDL_Color yellow{255, 255, 0, 255};
+  std::string statusHint;
+
+  // Handle live dragging on volume bars
+  if (mouseLeftDown_ && confirmAction_ == ConfirmAction::None) {
+    if (const TexEntry* vb = getTexture("gfx/gui/volume_dark.tga")) {
+      if (Rect{295, 252, vb->w, vb->h}.contains(mp.x, mp.y)) {
+        masterVolume_ = std::clamp((mp.x - 295) * 100 / std::max(1, vb->w), 0, 100);
+        muteMaster_ = false;
+        applyAudioVolumes();
+      } else if (Rect{295, 290, vb->w, vb->h}.contains(mp.x, mp.y)) {
+        musicVolume_ = std::clamp((mp.x - 295) * 100 / std::max(1, vb->w), 0, 100);
+        muteMusic_ = false;
+        applyAudioVolumes();
+      }
+    }
+  }
+
+  // Master Volume
+  bool hov = false;
+  drawMenuButton(muteMaster_ ? "gfx/gui/main/sound_off.tga" : "gfx/gui/main/sound_on.tga",
+                 muteMaster_ ? "gfx/gui/main/sound_off_hov.tga" : "gfx/gui/main/sound_on_hov.tga",
+                 muteMaster_ ? "gfx/gui/main/sound_off_hov.tga" : "gfx/gui/main/sound_on_hov.tga",
+                 251, 248, 0, 0, "", fontSmall_, green, yellow, mp, mouseLeftDown_, &hov);
+  if (hov) statusHint = statusStrings_["mute_master"];
+
+  if (const TexEntry* vDark = getTexture("gfx/gui/volume_dark.tga")) {
+    drawMenuImage("gfx/gui/volume_dark.tga", 295, 252);
+    bool barHov = Rect{295, 252, vDark->w, vDark->h}.contains(mp.x, mp.y);
+    if (barHov) statusHint = statusStrings_["mastervolume"];
+    const TexEntry* vFront = getTexture(barHov ? "gfx/gui/volume_hov.tga" : "gfx/gui/volume_norm.tga");
+    if (vFront && !muteMaster_) {
+      int fillW = vFront->w * masterVolume_ / 100;
+      SDL_Rect src{0, 0, fillW, vFront->h};
+      SDL_Rect dst = menuRect(295, 252, fillW, vFront->h);
+      SDL_RenderCopy(ren_, vFront->tex, &src, &dst);
+    }
+  }
+  fontSmall_.drawAligned(menuStrings_["master volume"].empty() ? "Громкость" : menuStrings_["master volume"],
+                         menuRect(410, 249, 237, 44), green, -1, 0);
+
+  // Music Volume
+  drawMenuButton(muteMusic_ ? "gfx/gui/main/sound_off.tga" : "gfx/gui/main/sound_on.tga",
+                 muteMusic_ ? "gfx/gui/main/sound_off_hov.tga" : "gfx/gui/main/sound_on_hov.tga",
+                 muteMusic_ ? "gfx/gui/main/sound_off_hov.tga" : "gfx/gui/main/sound_on_hov.tga",
+                 251, 292, 0, 0, "", fontSmall_, green, yellow, mp, mouseLeftDown_, &hov);
+  if (hov) statusHint = statusStrings_["mute_music"];
+
+  if (const TexEntry* vDark = getTexture("gfx/gui/volume_dark.tga")) {
+    drawMenuImage("gfx/gui/volume_dark.tga", 295, 290);
+    bool barHov = Rect{295, 290, vDark->w, vDark->h}.contains(mp.x, mp.y);
+    if (barHov) statusHint = statusStrings_["musicvolume"];
+    const TexEntry* vFront = getTexture(barHov ? "gfx/gui/volume_hov.tga" : "gfx/gui/volume_norm.tga");
+    if (vFront && !muteMusic_ && !muteMaster_) {
+      int fillW = vFront->w * musicVolume_ / 100;
+      SDL_Rect src{0, 0, fillW, vFront->h};
+      SDL_Rect dst = menuRect(295, 290, fillW, vFront->h);
+      SDL_RenderCopy(ren_, vFront->tex, &src, &dst);
+    }
+  }
+  fontSmall_.drawAligned(menuStrings_["music volume"].empty() ? "Музыка" : menuStrings_["music volume"],
+                         menuRect(410, 287, 237, 44), green, -1, 0);
+
+  // Reset user data button
+  drawMenuButton("gfx/gui/main/spielstand_norm.tga", "gfx/gui/main/spielstand_hov.tga", "gfx/gui/main/spielstand_hov.tga",
+                 262, 335, 0, 0,
+                 menuStrings_["reset_userdata"].empty() ? "Удалить сохраненные игры" : menuStrings_["reset_userdata"],
+                 fontSmall_, green, yellow, mp, mouseLeftDown_, &hov);
+  if (hov) statusHint = statusStrings_["reset_userdata"];
+
+  // 4 Checkboxes
+  auto drawCheckbox = [&](int y, bool checked, const std::string& labelKey, const std::string& fallback,
+                          const std::string& statusKey) {
+    bool cHov = (confirmAction_ == ConfirmAction::None) && Rect{296, y, 250, 19}.contains(mp.x, mp.y);
+    std::string img = checked ? (cHov ? "gfx/gui/main/checkbox_on_hov.tga" : "gfx/gui/main/checkbox_on.tga")
+                              : (cHov ? "gfx/gui/main/checkbox_off_hov.tga" : "gfx/gui/main/checkbox_off.tga");
+    drawMenuImage(img, 296, y);
+    std::string txt = menuStrings_[labelKey].empty() ? fallback : menuStrings_[labelKey];
+    fontSmall_.drawAligned(txt, menuRect(320, y, 230, 18), cHov ? yellow : green, -1, 0);
+    if (cHov) statusHint = statusStrings_[statusKey];
+  };
+
+  drawCheckbox(367, optHighQuality_, "sound_quality1", "Высокое качество звука", "soundquality1");
+  drawCheckbox(388, optTimeLimit_, "timelimit", "Ограничение по времени", "timelimit");
+  drawCheckbox(409, optAutoScroll_, "autoscroll", "Отчет о пакостях", "autoscroll");
+  drawCheckbox(430, optColoredCursor_, "colored cursors", "Цветной курсор", "coloredcursors");
+
+  // Cancel & OK buttons
+  drawMenuButton("gfx/gui/main/choice_norm.tga", "gfx/gui/main/choice_hov.tga", "gfx/gui/main/choice_hov.tga",
+                 262, 455, 0, 0, menuStrings_["option_cancel"].empty() ? "Отмена" : menuStrings_["option_cancel"],
+                 fontSmall_, green, yellow, mp, mouseLeftDown_, &hov);
+  if (hov) statusHint = statusStrings_["cancel"];
+
+  drawMenuButton("gfx/gui/main/choice_norm.tga", "gfx/gui/main/choice_hov.tga", "gfx/gui/main/choice_hov.tga",
+                 402, 455, 0, 0, menuStrings_["option_ok"].empty() ? "ОК" : menuStrings_["option_ok"],
+                 fontSmall_, green, yellow, mp, mouseLeftDown_, &hov);
+  if (hov) statusHint = statusStrings_["ok"];
+
+  if (!statusHint.empty()) {
+    fontUI_.drawAligned(statusHint, menuRect(20, 540, 760, 46), SDL_Color{0, 0, 0, 255}, 0, 0);
+  }
+}
+
+void GameEngine::renderCreditsScreen() {
+  drawMenuImage("gfx/gui/main/credits.tga", 0, 0);
+  SDL_Rect clip = menuRect(120, 90, 560, 430);
+  SDL_RenderSetClipRect(ren_, &clip);
+
+  float y = creditsScrollY_;
+  for (const auto& item : creditsLines_) {
+    if (y >= 60.0f && y <= 530.0f && !item.first.empty()) {
+      SDL_Rect lineRect = menuRect(130, int(y), 540, 28);
+      if (item.second) {
+        fontBig_.drawAligned(item.first, lineRect, SDL_Color{255, 220, 90, 255}, 0, 0);
+      } else {
+        fontUI_.drawAligned(item.first, lineRect, SDL_Color{255, 255, 255, 255}, 0, 0);
+      }
+    }
+    y += 28.0f;
+  }
+  SDL_RenderSetClipRect(ren_, nullptr);
+  fontSmall_.drawAligned("Щелкните мышью или нажмите Esc для возврата в меню", menuRect(0, 555, 800, 30),
+                         SDL_Color{230, 230, 230, 230}, 0, 0);
+}
+
+void GameEngine::renderLevelSummaryOverlay() {
+  // Dim the house behind the summary screen
+  SDL_SetRenderDrawColor(ren_, 0, 0, 0, 145);
+  SDL_Rect full{0, 0, winW_, winH_};
+  SDL_RenderFillRect(ren_, &full);
+
+  Point mp = screenToMenu(mouseX_, mouseY_);
+  drawMenuImage("gfx/gui/ingame/abrechnungsscreen.tga", 125, 70);
+
+  SDL_Color green{75, 255, 0, 255};
+  SDL_Color yellow{255, 255, 0, 255};
+  std::string ratingTitle;
+  if (summaryTimeExpired_) {
+    ratingTitle = menuStrings_["gameover_timeover"].empty() ? "ВРЕМЯ ВЫШЛО!" : menuStrings_["gameover_timeover"];
+  } else if (summaryPerfect_) {
+    ratingTitle = menuStrings_["gameover_perfect"].empty() ? "ОТЛИЧНО!" : menuStrings_["gameover_perfect"];
+  } else if (summarySuccess_) {
+    ratingTitle = menuStrings_["gameover_success"].empty() ? "УСПЕШНО!" : menuStrings_["gameover_success"];
+  } else {
+    ratingTitle = menuStrings_["gameover_failed"].empty() ? "ПРОВАЛ" : menuStrings_["gameover_failed"];
+  }
+
+  fontTitle_.drawAligned(ratingTitle, menuRect(125 + 168, 70 + 118, 349, 42),
+                         summarySuccess_ ? green : SDL_Color{255, 110, 80, 255}, 0, 0);
+
+  fontSmall_.drawAligned(menuStrings_["gameover_tricks"].empty() ? "ПАКОСТЕЙ:" : menuStrings_["gameover_tricks"],
+                         menuRect(125 + 168, 70 + 185, 349, 20), green, 0, 1);
+  char trBuf[32];
+  std::snprintf(trBuf, sizeof trBuf, "%d / %d", tricksDone_, level_.info.reachable);
+  fontTitle_.drawAligned(trBuf, menuRect(125 + 168, 70 + 202, 349, 40), green, 0, 0);
+
+  fontSmall_.drawAligned(menuStrings_["gameover_quota"].empty() ? "ЗРИТЕЛЬСКАЯ ОЦЕНКА:" : menuStrings_["gameover_quota"],
+                         menuRect(125 + 168, 70 + 245, 349, 20), green, 0, 1);
+  char qBuf[32];
+  std::snprintf(qBuf, sizeof qBuf, "%d %%", quota_);
+  fontTitle_.drawAligned(qBuf, menuRect(125 + 168, 70 + 262, 349, 40), green, 0, 0);
+
+  drawMenuButton("gfx/gui/main/choice_norm.tga", "gfx/gui/main/choice_hov.tga", "gfx/gui/main/choice_hov.tga",
+                 125 + 190, 70 + 312, 0, 0,
+                 menuStrings_["gameover_restart"].empty() ? "ПЕРЕСНЯТЬ" : menuStrings_["gameover_restart"],
+                 fontSmall_, green, yellow, mp, mouseLeftDown_);
+  drawMenuButton("gfx/gui/main/choice_norm.tga", "gfx/gui/main/choice_hov.tga", "gfx/gui/main/choice_hov.tga",
+                 125 + 342, 70 + 312, 0, 0,
+                 menuStrings_["gameover_continue"].empty() ? "ОК" : menuStrings_["gameover_continue"],
+                 fontSmall_, green, yellow, mp, mouseLeftDown_);
+}
+
+void GameEngine::renderSeasonVictoryScreen() {
+  const char* bg = (seasonTrophyTier_ >= 3) ? "gfx/gui/main/endscreen_gold.tga"
+                 : (seasonTrophyTier_ == 2) ? "gfx/gui/main/endscreen_silver.tga"
+                 : (seasonTrophyTier_ == 1) ? "gfx/gui/main/endscreen_bronze.tga"
+                                            : "gfx/gui/main/endscreen_default.tga";
+  const char* tKey = (seasonTrophyTier_ >= 3) ? "victory_gold_title"
+                   : (seasonTrophyTier_ == 2) ? "victory_silver_title"
+                   : (seasonTrophyTier_ == 1) ? "victory_bronze_title"
+                                              : "victory_default_title";
+  const char* bKey = (seasonTrophyTier_ >= 3) ? "victory_gold"
+                   : (seasonTrophyTier_ == 2) ? "victory_silver"
+                   : (seasonTrophyTier_ == 1) ? "victory_bronze"
+                                              : "victory_default";
+
+  drawMenuImage(bg, 0, 0);
+  std::string title = menuStrings_[tKey];
+  std::string body = menuStrings_[bKey];
+  fontTitle_.drawAligned(title, menuRect(3, 67, 720, 60), SDL_Color{0, 0, 0, 255}, 1, 0);
+  fontTitle_.drawAligned(title, menuRect(0, 65, 720, 60), SDL_Color{255, 255, 255, 255}, 1, 0);
+  fontBig_.drawWrapped(body, menuRect(463, 172, 300, 360), SDL_Color{0, 0, 0, 255}, 0, -1);
+  fontBig_.drawWrapped(body, menuRect(460, 170, 300, 360), SDL_Color{255, 255, 255, 255}, 0, -1);
+}
+
+void GameEngine::renderConfirmModal() {
+  if (confirmAction_ == ConfirmAction::None) return;
+  SDL_SetRenderDrawColor(ren_, 0, 0, 0, 155);
+  SDL_Rect full{0, 0, winW_, winH_};
+  SDL_RenderFillRect(ren_, &full);
+
+  Point mp = screenToMenu(mouseX_, mouseY_);
+  int bx = 180, by = 175;
+  drawMenuImage("gfx/gui/ingame/messagebox_top.tga", bx, by);
+  drawMenuImage("gfx/gui/ingame/mb_head_01.tga", bx + 175, by);
+  for (int i = 0; i < 6; ++i) {
+    drawMenuImage("gfx/gui/ingame/messagebox_mid.tga", bx, by + 50 + i * 16);
+  }
+  drawMenuImage("gfx/gui/ingame/messagebox_low2.tga", bx, by + 50 + 6 * 16);
+
+  fontUI_.drawWrapped(confirmText_, menuRect(bx + 28, by + 55, 385, 90), SDL_Color{0, 0, 0, 255}, 0, 0);
+
+  int lowY = by + 50 + 6 * 16;
+  bool hovYes = Rect{bx + 13, lowY + 18, 52, 42}.contains(mp.x, mp.y);
+  bool hovNo = Rect{bx + 375, lowY + 18, 52, 42}.contains(mp.x, mp.y);
+  drawMenuImage(hovYes ? (mouseLeftDown_ ? "gfx/gui/ingame/messagebox_ok_pressed.tga" : "gfx/gui/ingame/messagebox_ok_hover.tga")
+                       : "gfx/gui/ingame/messagebox_ok_std.tga",
+                bx + 13, lowY + 18);
+  drawMenuImage(hovNo ? (mouseLeftDown_ ? "gfx/gui/ingame/messagebox_cancel_pressed.tga" : "gfx/gui/ingame/messagebox_cancel_hover.tga")
+                      : "gfx/gui/ingame/messagebox_cancel_std.tga",
+                bx + 375, lowY + 18);
+}
+
+void GameEngine::onMenuClick(Point mp, bool doubleClick) {
+  // Handle confirmation modal first if active
+  if (confirmAction_ != ConfirmAction::None) {
+    int bx = 180, lowY = 175 + 50 + 6 * 16;
+    if (Rect{bx + 13, lowY + 18, 52, 42}.contains(mp.x, mp.y)) {
+      playSfx("sfx/but1.wav");
+      ConfirmAction act = confirmAction_;
+      confirmAction_ = ConfirmAction::None;
+      if (act == ConfirmAction::QuitGame) running_ = false;
+      else if (act == ConfirmAction::ResetProgress) resetUserProgress();
+      else if (act == ConfirmAction::AbortEpisode) enterScreen(ScreenState::MainMenu);
+      else if (act == ConfirmAction::RestartEpisode) {
+        selectLevel(currentLevelIdx_);
+        enterScreen(ScreenState::InGame);
+      }
+      return;
+    }
+    if (Rect{bx + 375, lowY + 18, 52, 42}.contains(mp.x, mp.y)) {
+      playSfx("sfx/but1.wav");
+      confirmAction_ = ConfirmAction::None;
+      return;
+    }
+    return;
+  }
+
+  switch (screen_) {
+    case ScreenState::MainMenu: {
+      if (Rect{248, 286, 333, 54}.contains(mp.x, mp.y)) {
+        playSfx("sfx/but1.wav");
+        enterScreen(ScreenState::EpisodeSelect);
+      } else if (Rect{248, 341, 333, 54}.contains(mp.x, mp.y)) {
+        playSfx("sfx/but1.wav");
+        enterScreen(ScreenState::Credits);
+      } else if (Rect{248, 396, 333, 54}.contains(mp.x, mp.y)) {
+        playSfx("sfx/but1.wav");
+        optionsReturnScreen_ = ScreenState::MainMenu;
+        enterScreen(ScreenState::Options);
+      } else if (Rect{248, 451, 333, 54}.contains(mp.x, mp.y)) {
+        playSfx("sfx/but1.wav");
+        confirmAction_ = ConfirmAction::QuitGame;
+        confirmText_ = menuStrings_["reallyquit"].empty() ? "Вы действительно хотите выйти из игры?" : menuStrings_["reallyquit"];
+      }
+      break;
+    }
+
+    case ScreenState::EpisodeSelect: {
+      for (size_t i = 0; i < briefings_.size(); ++i) {
+        const BriefingInfo& bi = briefings_[i];
+        if (Rect{bi.menuX, bi.menuY, 75, 60}.contains(mp.x, mp.y)) {
+          playSfx("sfx/but1.wav");
+          previewLevelIdx_ = (int)i;
+          if (doubleClick) {
+            selectLevel(previewLevelIdx_);
+            enterScreen(ScreenState::InGame);
+          }
+          return;
+        }
+      }
+      // Back to Main Menu button
+      if (Rect{25, 520, 340, 55}.contains(mp.x, mp.y)) {
+        playSfx("sfx/but1.wav");
+        enterScreen(ScreenState::MainMenu);
+        return;
+      }
+      // Start Episode button ("Съемка")
+      if (Rect{400 + 270, 480, 110, 95}.contains(mp.x, mp.y)) {
+        playSfx("sfx/but1.wav");
+        selectLevel(previewLevelIdx_);
+        enterScreen(ScreenState::InGame);
+        return;
+      }
+      break;
+    }
+
+    case ScreenState::PauseMenu: {
+      if (Rect{33, 170, 333, 54}.contains(mp.x, mp.y) || Rect{400 + 270, 480, 110, 95}.contains(mp.x, mp.y)) {
+        playSfx("sfx/but1.wav");
+        enterScreen(ScreenState::InGame);
+      } else if (Rect{33, 225, 333, 54}.contains(mp.x, mp.y)) {
+        playSfx("sfx/but1.wav");
+        confirmAction_ = ConfirmAction::RestartEpisode;
+        confirmText_ = menuStrings_["mm_restartlevel"].empty() ? "Вы действительно хотите начать съемки заново?"
+                                                               : menuStrings_["mm_restartlevel"];
+      } else if (Rect{33, 280, 333, 54}.contains(mp.x, mp.y)) {
+        playSfx("sfx/but1.wav");
+        enterScreen(ScreenState::EpisodeSelect);
+      } else if (Rect{33, 335, 333, 54}.contains(mp.x, mp.y)) {
+        playSfx("sfx/but1.wav");
+        optionsReturnScreen_ = ScreenState::PauseMenu;
+        enterScreen(ScreenState::Options);
+      } else if (Rect{33, 390, 333, 54}.contains(mp.x, mp.y)) {
+        playSfx("sfx/but1.wav");
+        confirmAction_ = ConfirmAction::AbortEpisode;
+        confirmText_ = menuStrings_["mm_exitlevel"].empty() ? "Вы действительно хотите завершить серию?"
+                                                            : menuStrings_["mm_exitlevel"];
+      }
+      break;
+    }
+
+    case ScreenState::Options: {
+      if (Rect{251, 248, 36, 36}.contains(mp.x, mp.y)) {
+        playSfx("sfx/but1.wav");
+        muteMaster_ = !muteMaster_;
+        applyAudioVolumes();
+      } else if (Rect{251, 292, 36, 36}.contains(mp.x, mp.y)) {
+        playSfx("sfx/but1.wav");
+        muteMusic_ = !muteMusic_;
+        applyAudioVolumes();
+      } else if (Rect{262, 335, 220, 28}.contains(mp.x, mp.y)) {
+        playSfx("sfx/but1.wav");
+        confirmAction_ = ConfirmAction::ResetProgress;
+        confirmText_ = menuStrings_["mm_resetuserdata"].empty()
+                           ? "Вы действительно хотите удалить сохраненные игры?"
+                           : menuStrings_["mm_resetuserdata"];
+      } else if (Rect{296, 367, 250, 19}.contains(mp.x, mp.y)) {
+        playSfx("sfx/but1.wav");
+        optHighQuality_ = !optHighQuality_;
+      } else if (Rect{296, 388, 250, 19}.contains(mp.x, mp.y)) {
+        playSfx("sfx/but1.wav");
+        optTimeLimit_ = !optTimeLimit_;
+      } else if (Rect{296, 409, 250, 19}.contains(mp.x, mp.y)) {
+        playSfx("sfx/but1.wav");
+        optAutoScroll_ = !optAutoScroll_;
+      } else if (Rect{296, 430, 250, 19}.contains(mp.x, mp.y)) {
+        playSfx("sfx/but1.wav");
+        optColoredCursor_ = !optColoredCursor_;
+      } else if (Rect{262, 455, 115, 32}.contains(mp.x, mp.y)) {
+        // Cancel: restore backed up options
+        playSfx("sfx/but1.wav");
+        masterVolume_ = bakMasterVolume_;
+        musicVolume_ = bakMusicVolume_;
+        muteMaster_ = bakMuteMaster_;
+        muteMusic_ = bakMuteMusic_;
+        optHighQuality_ = bakHighQuality_;
+        optTimeLimit_ = bakTimeLimit_;
+        optAutoScroll_ = bakAutoScroll_;
+        optColoredCursor_ = bakColoredCursor_;
+        applyAudioVolumes();
+        enterScreen(optionsReturnScreen_);
+      } else if (Rect{402, 455, 115, 32}.contains(mp.x, mp.y)) {
+        // OK: save options
+        playSfx("sfx/but1.wav");
+        saveUserProgress();
+        enterScreen(optionsReturnScreen_);
+      }
+      break;
+    }
+
+    case ScreenState::Credits: {
+      playSfx("sfx/but1.wav");
+      enterScreen(ScreenState::MainMenu);
+      break;
+    }
+
+    case ScreenState::LevelSummary: {
+      if (Rect{125 + 190, 70 + 312, 115, 32}.contains(mp.x, mp.y)) {
+        playSfx("sfx/but1.wav");
+        selectLevel(currentLevelIdx_);
+        enterScreen(ScreenState::InGame);
+      } else if (Rect{125 + 342, 70 + 312, 115, 32}.contains(mp.x, mp.y)) {
+        playSfx("sfx/but1.wav");
+        if (summarySuccess_ && currentLevelIdx_ + 1 < (int)levels_.size()) {
+          previewLevelIdx_ = currentLevelIdx_ + 1;
+        }
+        enterScreen(ScreenState::EpisodeSelect);
+      }
+      break;
+    }
+
+    case ScreenState::SeasonVictory: {
+      playSfx("sfx/but1.wav");
+      enterScreen(ScreenState::EpisodeSelect);
+      break;
+    }
+
+    default:
+      break;
+  }
+}
+
 void GameEngine::renderCursor() {
-  // If an inventory item is selected, draw its icon next to the cursor
-  if (selectedInv_ >= 0 && selectedInv_ < (int)inventory_.size()) {
+  if (screen_ == ScreenState::InGame && selectedInv_ >= 0 && selectedInv_ < (int)inventory_.size()) {
     auto it = level_.inventar.find(toLowerAscii(inventory_[selectedInv_]));
     if (it != level_.inventar.end()) {
       if (const TexEntry* itex = getTexture(it->second.gfxStd)) {
@@ -2158,17 +3130,48 @@ void GameEngine::renderCursor() {
       }
     }
   }
-  if (const TexEntry* ctex = getTexture(cursorVpath_)) {
+  const std::string& curPath = (screen_ == ScreenState::InGame) ? cursorVpath_ : std::string("gfx/cursor/normal.tga");
+  if (const TexEntry* ctex = getTexture(curPath)) {
     SDL_Rect dst{mouseX_, mouseY_, ctex->w, ctex->h};
     SDL_RenderCopy(ren_, ctex->tex, nullptr, &dst);
   }
 }
 
 void GameEngine::render() {
-  SDL_SetRenderDrawColor(ren_, 20, 22, 28, 255);
+  SDL_SetRenderDrawColor(ren_, 14, 16, 22, 255);
   SDL_RenderClear(ren_);
-  renderWorld();
-  renderHud();
+
+  switch (screen_) {
+    case ScreenState::MainMenu:
+      renderMainMenu();
+      break;
+    case ScreenState::EpisodeSelect:
+      renderEpisodeSelect();
+      break;
+    case ScreenState::PauseMenu:
+      renderPauseMenu();
+      break;
+    case ScreenState::Options:
+      renderOptionsScreen();
+      break;
+    case ScreenState::Credits:
+      renderCreditsScreen();
+      break;
+    case ScreenState::SeasonVictory:
+      renderSeasonVictoryScreen();
+      break;
+    case ScreenState::InGame:
+      renderWorld();
+      renderHud();
+      break;
+    case ScreenState::LevelSummary:
+      renderWorld();
+      renderHud();
+      renderLevelSummaryOverlay();
+      break;
+  }
+
+  renderConfirmModal();
   renderCursor();
   SDL_RenderPresent(ren_);
 }
@@ -2205,7 +3208,7 @@ int GameEngine::run() {
           SDL_GetWindowSize(window_, &ww, &wh);
           mouseX_ = e.motion.x * winW_ / std::max(1, ww);
           mouseY_ = e.motion.y * winH_ / std::max(1, wh);
-          if (camDragging_) {
+          if (screen_ == ScreenState::InGame && camDragging_) {
             camX_ += e.motion.xrel * float(winW_) / std::max(1, ww);
             camY_ += e.motion.yrel * float(winH_) / std::max(1, wh);
           }
@@ -2216,43 +3219,82 @@ int GameEngine::run() {
           SDL_GetWindowSize(window_, &ww, &wh);
           mouseX_ = e.button.x * winW_ / std::max(1, ww);
           mouseY_ = e.button.y * winH_ / std::max(1, wh);
-          Point wp = screenToWorld(mouseX_, mouseY_);
-          updateHover(wp.x, wp.y, mouseX_, mouseY_);
-          if (e.button.button == SDL_BUTTON_LEFT) {
-            onLeftClick(wp.x, wp.y, mouseX_, mouseY_, e.button.clicks >= 2);
-          } else if (e.button.button == SDL_BUTTON_RIGHT) {
-            onRightClick(wp.x, wp.y, mouseX_, mouseY_);
-          } else if (e.button.button == SDL_BUTTON_MIDDLE) {
-            fullHouseView_ = false;
-            camDragging_ = true;
+          if (e.button.button == SDL_BUTTON_LEFT) mouseLeftDown_ = true;
+
+          if (screen_ != ScreenState::InGame || confirmAction_ != ConfirmAction::None) {
+            if (e.button.button == SDL_BUTTON_LEFT) {
+              onMenuClick(screenToMenu(mouseX_, mouseY_), e.button.clicks >= 2);
+            }
+          } else {
+            Point wp = screenToWorld(mouseX_, mouseY_);
+            updateHover(wp.x, wp.y, mouseX_, mouseY_);
+            if (e.button.button == SDL_BUTTON_LEFT) {
+              onLeftClick(wp.x, wp.y, mouseX_, mouseY_, e.button.clicks >= 2);
+            } else if (e.button.button == SDL_BUTTON_RIGHT) {
+              onRightClick(wp.x, wp.y, mouseX_, mouseY_);
+            } else if (e.button.button == SDL_BUTTON_MIDDLE) {
+              fullHouseView_ = false;
+              camDragging_ = true;
+            }
           }
           break;
         }
         case SDL_MOUSEBUTTONUP:
+          if (e.button.button == SDL_BUTTON_LEFT) mouseLeftDown_ = false;
           if (e.button.button == SDL_BUTTON_MIDDLE) camDragging_ = false;
           break;
         case SDL_KEYDOWN: {
           switch (e.key.keysym.sym) {
             case SDLK_ESCAPE:
-              if (selectedInv_ >= 0) selectedInv_ = -1;
-              else running_ = false;
+              if (confirmAction_ != ConfirmAction::None) {
+                confirmAction_ = ConfirmAction::None;
+              } else if (screen_ == ScreenState::InGame) {
+                if (selectedInv_ >= 0) selectedInv_ = -1;
+                else {
+                  playSfx("sfx/but1.wav");
+                  enterScreen(ScreenState::PauseMenu);
+                }
+              } else if (screen_ == ScreenState::PauseMenu) {
+                playSfx("sfx/but1.wav");
+                enterScreen(ScreenState::InGame);
+              } else if (screen_ == ScreenState::EpisodeSelect || screen_ == ScreenState::Credits) {
+                playSfx("sfx/but1.wav");
+                enterScreen(ScreenState::MainMenu);
+              } else if (screen_ == ScreenState::Options) {
+                playSfx("sfx/but1.wav");
+                enterScreen(optionsReturnScreen_);
+              } else if (screen_ == ScreenState::LevelSummary || screen_ == ScreenState::SeasonVictory) {
+                playSfx("sfx/but1.wav");
+                enterScreen(ScreenState::EpisodeSelect);
+              } else if (screen_ == ScreenState::MainMenu) {
+                confirmAction_ = ConfirmAction::QuitGame;
+                confirmText_ = menuStrings_["reallyquit"].empty() ? "Вы действительно хотите выйти из игры?"
+                                                                  : menuStrings_["reallyquit"];
+              }
               break;
             case SDLK_SPACE:
-              paused_ = !paused_;
-              statusBanner_ = paused_ ? "ПАУЗА" : "Игра продолжается";
-              bannerTicks_ = kTicksPerSecond * 2;
+              if (screen_ == ScreenState::InGame) {
+                paused_ = !paused_;
+                statusBanner_ = paused_ ? "ПАУЗА" : "Игра продолжается";
+                bannerTicks_ = kTicksPerSecond * 2;
+              }
               break;
             case SDLK_v:
             case SDLK_TAB:
-              fullHouseView_ = !fullHouseView_;
-              statusBanner_ = fullHouseView_ ? "Камера: весь дом" : "Камера: слежение за Вуди";
-              bannerTicks_ = kTicksPerSecond * 2;
+              if (screen_ == ScreenState::InGame) {
+                fullHouseView_ = !fullHouseView_;
+                statusBanner_ = fullHouseView_ ? "Камера: весь дом" : "Камера: слежение за Вуди";
+                bannerTicks_ = kTicksPerSecond * 2;
+              }
               break;
             case SDLK_h:
               showDebug_ = !showDebug_;
               break;
             case SDLK_r:
-              selectLevel(currentLevelIdx_);
+              if (screen_ == ScreenState::InGame || screen_ == ScreenState::LevelSummary) {
+                selectLevel(currentLevelIdx_);
+                enterScreen(ScreenState::InGame);
+              }
               break;
             case SDLK_LEFTBRACKET:
             case SDLK_F1:

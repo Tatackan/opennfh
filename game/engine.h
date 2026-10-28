@@ -19,12 +19,25 @@ namespace nfh {
 struct GameOptions {
   std::string gamePath;
   std::string levelName = "level_peep";  // first playable episode by default
+  bool startInLevel = false;             // true if --level was explicitly passed
+  std::string initialScreen;             // optional --screen mainmenu|episodes|options|pause|credits|summary
   std::string screenshot;                // optional --screenshot FILE.png for automated testing
-  int screenshotTicks = 60;              // how many 20 Hz ticks to simulate before screenshot
+  int screenshotTicks = 60;              // how many ticks to simulate before screenshot
 };
 
 class GameEngine {
  public:
+  enum class ScreenState {
+    MainMenu,
+    EpisodeSelect,
+    InGame,
+    PauseMenu,
+    Options,
+    Credits,
+    LevelSummary,
+    SeasonVictory,
+  };
+
   GameEngine();
   ~GameEngine();
 
@@ -36,6 +49,23 @@ class GameEngine {
     SDL_Texture* tex = nullptr;
     int w = 0;
     int h = 0;
+  };
+
+  struct BriefingInfo {
+    std::string title;
+    std::string hintText;
+    std::string picText;
+    std::string briefing;
+    std::string buttonShortName;
+    int menuX = 25;
+    int menuY = 185;
+  };
+
+  struct LevelProgress {
+    int bestQuota = 0;
+    int bestTricks = 0;
+    bool completed = false;
+    bool perfect = false;
   };
 
   struct ActorState {
@@ -108,6 +138,23 @@ class GameEngine {
   void clearTextures();
   void playSfx(const std::string& sfxPath);
   void startMusic(const std::string& musicVpath);
+  void applyAudioVolumes();
+
+  // --- menu & profile data ---
+  void loadMenuData();
+  void loadUserProgress();
+  void saveUserProgress() const;
+  void resetUserProgress();
+  void enterScreen(ScreenState st);
+  void finishEpisode(bool timeExpired, bool caughtOut);
+
+  float menuScale() const;
+  Point screenToMenu(int sx, int sy) const;
+  SDL_Rect menuRect(int x, int y, int w, int h) const;
+  void drawMenuImage(const std::string& vpath, int x, int y);
+  bool drawMenuButton(const std::string& stdImg, const std::string& hovImg, const std::string& downImg,
+                      int x, int y, int w, int h, const std::string& caption, TextRenderer& font,
+                      SDL_Color stdColor, SDL_Color hovColor, Point menuMouse, bool mouseDown, bool* outHovered = nullptr);
 
   // --- level management ---
   bool selectLevel(int index);
@@ -134,6 +181,7 @@ class GameEngine {
   void updateHover(int worldX, int worldY, int screenX, int screenY);
   void onLeftClick(int worldX, int worldY, int screenX, int screenY, bool doubleClick);
   void onRightClick(int worldX, int worldY, int screenX, int screenY);
+  void onMenuClick(Point mp, bool doubleClick);
   void queuePathToRoom(const std::string& destRoom, bool sneak);
   const CombinationDef* findCombination(const std::string& targetName, const std::string& itemName) const;
 
@@ -143,6 +191,15 @@ class GameEngine {
   void renderObject(const PlacedObject& po);
   void renderActor(const ActorState& a);
   void renderHud();
+  void renderMainMenu();
+  void renderEpisodeSelect();
+  void renderPauseMenu();
+  void renderBriefingRightPanel(int levelIdx, bool isInGameMenu);
+  void renderOptionsScreen();
+  void renderCreditsScreen();
+  void renderLevelSummaryOverlay();
+  void renderSeasonVictoryScreen();
+  void renderConfirmModal();
   void renderCursor();
   void saveScreenshot(const std::string& file);
 
@@ -159,9 +216,51 @@ class GameEngine {
   bool fullHouseView_ = true;
   int winW_ = 1280, winH_ = 800;
 
-  TextRenderer fontUI_, fontBig_, fontHud_;
+  ScreenState screen_ = ScreenState::MainMenu;
+  ScreenState optionsReturnScreen_ = ScreenState::MainMenu;
+  int previewLevelIdx_ = 0;  // selected level in EpisodeSelect
+  std::string currentMusicVpath_;
+
+  // Confirmation modal state
+  enum class ConfirmAction { None, QuitGame, ResetProgress, AbortEpisode, RestartEpisode };
+  ConfirmAction confirmAction_ = ConfirmAction::None;
+  std::string confirmText_;
+
+  // Options state
+  int masterVolume_ = 85;
+  int musicVolume_ = 75;
+  bool muteMaster_ = false;
+  bool muteMusic_ = false;
+  bool optHighQuality_ = true;
+  bool optTimeLimit_ = true;
+  bool optAutoScroll_ = true;
+  bool optColoredCursor_ = true;
+  // Backup of options before editing in Options screen
+  int bakMasterVolume_ = 85;
+  int bakMusicVolume_ = 75;
+  bool bakMuteMaster_ = false;
+  bool bakMuteMusic_ = false;
+  bool bakHighQuality_ = true;
+  bool bakTimeLimit_ = true;
+  bool bakAutoScroll_ = true;
+  bool bakColoredCursor_ = true;
+
+  // Summary & credits state
+  bool summarySuccess_ = false;
+  bool summaryPerfect_ = false;
+  bool summaryTimeExpired_ = false;
+  int completedSeason_ = 0;  // 1..3 when SeasonVictory triggers
+  int seasonTrophyTier_ = 0; // 0=default, 1=bronze, 2=silver, 3=gold
+  float creditsScrollY_ = 560.0f;
+  std::vector<std::pair<std::string, bool>> creditsLines_;  // (text, isHeader)
+
+  TextRenderer fontUI_, fontBig_, fontHud_, fontSmall_, fontTitle_;
   std::unique_ptr<GameData> gd_;
   std::vector<LevelInfo> levels_;
+  std::vector<BriefingInfo> briefings_;
+  std::unordered_map<std::string, LevelProgress> progress_;
+  std::unordered_map<std::string, std::string> menuStrings_;
+  std::unordered_map<std::string, std::string> statusStrings_;
   int currentLevelIdx_ = 0;
   LevelData level_;
 
@@ -193,6 +292,7 @@ class GameEngine {
   std::string currentBubbleIcon_;
   bool catchSequenceActive_ = false;
   int catchTicks_ = 0;
+  int catchesCount_ = 0;
 
   // Inventory & score
   std::vector<std::string> inventory_;
@@ -209,6 +309,8 @@ class GameEngine {
 
   // Hover & cursor
   int mouseX_ = 0, mouseY_ = 0;
+  bool mouseLeftDown_ = false;
+  std::string lastHoveredBtn_;
   int hoveredObject_ = -1;
   std::string hoveredRoom_;
   std::string hoverText_;
