@@ -477,6 +477,16 @@ bool GameEngine::selectLevel(int index) {
   }
   if (!hasNeighbor) neighbor_.hidden = true;  // tutorial_1 has HAL instead of neighbor
 
+  // In level_hunter, lir/tabacbox is placed on the living room table by the Neighbor at the start
+  if (level_.findObjectDef("lir/tabacbox") && findObjectIndex("lir/tabacbox", "lir") < 0) {
+    PlacedObject tb;
+    tb.name = "lir/tabacbox";
+    tb.roomName = "lir";
+    tb.layer = 1;
+    tb.visible = true;
+    level_.objects.push_back(std::move(tb));
+  }
+
   buildNeighborRoutine();
 
   std::string epTitle = (currentLevelIdx_ < (int)briefings_.size()) ? briefings_[currentLevelIdx_].title : level_.info.name;
@@ -533,10 +543,21 @@ void GameEngine::buildNeighborRoutine() {
 
   for (const PlacedObject& po : level_.objects) {
     if (po.isDoor) continue;
+    const std::string lowerPo = toLowerAscii(po.name);
+    // Helper objects driven as part of another stop's animation sequence:
+    if (lowerPo == "kit/window" || lowerPo == "bed/alarmclock" || lowerPo == "toi/shower" ||
+        lowerPo == "toi/towel" || lowerPo == "lir/pieces" || lowerPo == "bed/posingspot" ||
+        lowerPo == "aux" || lowerPo == "anc/wardrobe" || lowerPo == "bal/plant") {
+      continue;
+    }
+    if (lowerPo == "bed/bed" && !level_.findObjectDef("bed/bed_sleep")) continue;
+
     const ObjectDef* od = level_.findObjectDef(po.name);
     if (!od) continue;
 
-    bool hasNormalNeighborAct = false;
+    bool hasNormalNeighborAct = (od->hotspots.count("neighbor") > 0 && !od->hasFlag("hideout") &&
+                                 (!od->hasFlag("container") || lowerPo == "kit/fridge" ||
+                                  lowerPo == "bed/keyboard" || lowerPo == "bed/magnesiumbottle"));
     for (const ActionDef& a : od->actions) {
       if (toLowerAscii(a.actor) == "neighbor" && a.name != "clean" && a.name != "repair") {
         hasNormalNeighborAct = true;
@@ -547,29 +568,36 @@ void GameEngine::buildNeighborRoutine() {
     std::string trickObjName;
     bool hasTrickNeighborAct = false;
     for (const auto& c : level_.combinations) {
-      if (toLowerAscii(c.target) == toLowerAscii(po.name) && c.isTrick) {
+      if (toLowerAscii(c.target) == lowerPo && c.isTrick) {
         trickObjName = c.resultObject;
-        if (const ObjectDef* tod = level_.findObjectDef(trickObjName)) {
-          for (const ActionDef& a : tod->actions) {
-            if (toLowerAscii(a.actor) == "neighbor") {
-              hasTrickNeighborAct = true;
-              break;
-            }
-          }
-        }
+        hasTrickNeighborAct = true;
         break;
       }
     }
 
     if (!hasNormalNeighborAct && !hasTrickNeighborAct) continue;
-    // kit/window is a fallback for kit/binoculars after superglue destroys the binoculars
-    if (toLowerAscii(po.name) == "kit/window") continue;
 
     RoutineStop stop;
     stop.room = po.roomName;
     stop.normalObj = po.name;
     stop.trickObj = trickObjName;
-    if (toLowerAscii(po.name) == "kit/binoculars") stop.fallbackObj = "kit/window";
+    if (lowerPo == "kit/binoculars") stop.fallbackObj = "kit/window";
+    else if (lowerPo == "bed/teeth_empty") {
+      stop.fallbackObj = "bed/teeth";
+      stop.trickObj = "bed/teeth_tabasco";
+    } else if (lowerPo == "toi/tub_empty") {
+      stop.fallbackObj = "toi/tub";
+      stop.trickObj = "toi/tub_hair";
+    } else if (lowerPo == "bal/noclothes") {
+      stop.fallbackObj = "bal/clothes";
+      stop.trickObj = "bal/clothes_food";
+    } else if (lowerPo == "bed/ironingboard") {
+      stop.fallbackObj = "bed/ironingboard_clothes";
+      stop.trickObj = "bed/ironingboard_burn";
+    } else if (lowerPo == "lir/lockedphono") {
+      stop.fallbackObj = "lir/phono_open";
+      stop.trickObj = "lir/phono_nail";
+    }
     stop.onlyWhenTricked = !hasNormalNeighborAct;
 
     size_t slash = po.name.find('/');
@@ -596,13 +624,16 @@ void GameEngine::buildNeighborRoutine() {
           (icon == "photo_album" && sr == "book") ||
           (icon == "bath" && (sr == "tub_empty" || sr == "tub")) ||
           (icon == "magnesium" && sr == "magnesiumbottle") ||
+          (icon == "statue" && (sr == "footstool" || sr == "statue")) ||
           (icon == "painting" && (sr == "picture_empty" || sr == "picture")) ||
           (icon == "toothbrush" && sr == "toothbrushset") ||
           (icon == "coffee" && sr == "coffeebox") ||
           (icon == "teeth" && (sr == "teeth_empty" || sr == "teeth")) ||
+          (icon == "pig_key" && sr == "keyboard") ||
           (icon == "cookies" && sr == "cookiebox") ||
-          (icon == "sleep" && sr == "bed") ||
+          ((icon == "alarm_clock" || icon == "bed" || icon == "sleep") && sr == "bed") ||
           (icon == "bbq" && sr == "barbecue") ||
+          (icon == "plant" && (sr == "spray" || sr == "plant")) ||
           (icon == "laundry_rack" && (sr == "noclothes" || sr == "clothes")) ||
           (icon == "ironing" && sn.find("ironing") != std::string::npos) ||
           (icon == "yoga_mat" && sr == "mat") ||
@@ -1654,6 +1685,35 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
   const bool isTricked = (trickIt != level_.tricks.end());
   const std::string origName = isTricked ? objectOriginalName(po.name) : std::string();
 
+  auto pushStep = [&](int targetIdx, const std::string& actAnim, const std::string& actNext,
+                      const std::string& obAnim, const std::string& obNext, int fallbackTicks = 24,
+                      const std::string& transformTo = "", bool scoreTrick = false,
+                      const TrickDef* trickPtr = nullptr, int secObjIdx = -1) {
+    TaskStep st{};
+    st.type = TaskStep::Type::PlayAction;
+    st.objectIndex = targetIdx;
+    st.outObjectIndex = secObjIdx;
+    st.actorAnim = actAnim;
+    st.actorNextAnim = actNext;
+    st.objAnim = obAnim;
+    st.objNextAnim = obNext;
+    const ObjectDef* tOd = (targetIdx >= 0 && targetIdx < (int)level_.objects.size())
+                                ? level_.findObjectDef(level_.objects[targetIdx].name)
+                                : od;
+    std::string gfxName = (tOd && !tOd->gfx.empty()) ? tOd->gfx : (od ? od->gfx : "");
+    if (actAnim == "inv" && !obAnim.empty()) {
+      st.durationTicks = animFrameCount(gfxName, obAnim, fallbackTicks);
+    } else {
+      st.durationTicks = animFrameCount("neighbor", actAnim, fallbackTicks);
+    }
+    st.transformObjectTo = transformTo;
+    if (scoreTrick && trickPtr) {
+      st.triggerPrankScore = true;
+      st.trick = *trickPtr;
+    }
+    neighborQueue_.push_back(st);
+  };
+
   // Special multi-phase handling for armchair (lir/sofa, lir/sofa_fartbag, lir/sofa_broken)
   if (lowerName == "lir/sofa" || lowerName == "lir/sofa_fartbag" || lowerName == "lir/sofa_broken") {
     TaskStep enterSt{};
@@ -1732,6 +1792,304 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
     return;
   }
 
+  // Bed & Alarm Clock sequence on level_pig (bed/bed, bed/bed_pins + bed/alarmclock, bed/cactusclock)
+  if (lowerName == "bed/bed_pins") {
+    pushStep(objIdx, "inv", "ms1", "enter", "ms", 36, "bed/bed", isTricked, isTricked ? &trickIt->second : nullptr);
+    pushStep(objIdx, "use_mid", "ms0", "", "ms", 24);
+    return;
+  }
+  if (lowerName == "bed/bed") {
+    int cactusIdx = findObjectIndex("bed/cactusclock", po.roomName);
+    int alarmIdx = (cactusIdx >= 0) ? cactusIdx : findObjectIndex("bed/alarmclock", po.roomName);
+    pushStep(objIdx, "inv", "inv", "enter", "sleep", 12);
+    pushStep(objIdx, "inv", "inv", "sleep", "sleep", 36);
+    if (cactusIdx >= 0) {
+      auto cTrick = level_.tricks.find("bed/cactusclock");
+      pushStep(objIdx, "inv", "inv", "hit_cactus", "leave", 36, "",
+               cTrick != level_.tricks.end(), cTrick != level_.tricks.end() ? &cTrick->second : nullptr, cactusIdx);
+    } else {
+      pushStep(objIdx, "inv", "inv", "hit_alarm", "leave", 24, "", false, nullptr, alarmIdx);
+    }
+    pushStep(objIdx, "inv", "ms1", "leave", "ms", 18);
+    return;
+  }
+
+  // Teeth glass, baby bottle, and parrot on level_pig
+  if (lowerName == "bed/teeth_empty") {
+    pushStep(objIdx, "give_short", "ms3", "", "ms", 12, "bed/teeth");
+    return;
+  }
+  if (lowerName == "bed/teeth") {
+    pushStep(objIdx, "take_short", "give_short", "", "ms", 12);
+    pushStep(objIdx, "give_short", "ms3", "", "ms", 12);
+    return;
+  }
+  if (lowerName == "bed/teeth_tabasco") {
+    pushStep(objIdx, "take_short", "spit_fire", "", "ms", 12);
+    pushStep(objIdx, "spit_fire", "ms1", "", "ms", 36, "bed/teeth", isTricked, isTricked ? &trickIt->second : nullptr);
+    return;
+  }
+  if (lowerName == "kit/babybottle") {
+    pushStep(objIdx, "take", "shake_bottle", "inv", "inv", 16);
+    pushStep(objIdx, "shake_bottle", "give", "inv", "inv", 24);
+    pushStep(objIdx, "give", "ms1", "ms", "ms", 16);
+    return;
+  }
+  if (lowerName == "kit/babybottle_nitro") {
+    pushStep(objIdx, "take", "shake_bottle_expo", "inv", "inv", 16);
+    pushStep(objIdx, "shake_bottle_expo", "ms2", "ms", "ms", 36, "kit/babybottle", isTricked, isTricked ? &trickIt->second : nullptr);
+    return;
+  }
+  if (lowerName == "chili") {
+    pushStep(objIdx, "give", "ms1", "eat_cookie", "sleep", 24);
+    return;
+  }
+
+  // Tub, Shower, Towel & Toilet on level_bath / level_piano
+  if (lowerName == "toi/tub_empty" || lowerName == "toi/tub" || lowerName == "toi/tub_hair") {
+    int shIdx = findObjectIndex("toi/shower", po.roomName);
+    int dirtyTowelIdx = findObjectIndex("toi/dirtytowel", po.roomName);
+    int cleanTowelIdx = findObjectIndex("toi/towel", po.roomName);
+    if (lowerName == "toi/tub_empty") {
+      pushStep(objIdx, "give_short", "ms3", "", "ms", 12, "toi/tub");
+    } else if (lowerName == "toi/tub_hair") {
+      pushStep(objIdx, "take_short", "inv", "", "ms", 12, "toi/tub", isTricked, isTricked ? &trickIt->second : nullptr);
+    } else {
+      pushStep(objIdx, "take_short", "inv", "", "ms", 12);
+    }
+    if (shIdx >= 0) {
+      if (lowerName == "toi/tub_hair") {
+        pushStep(shIdx, "inv", "ms2", "shower", "ms", 36);
+        pushStep(objIdx, "show_hair", "inv", "", "ms", 30);
+      } else {
+        pushStep(shIdx, "inv", "inv", "shower", "take_towel", 36);
+      }
+      pushStep(shIdx, "inv", "inv", "take_towel", "dry", 12, "", false, nullptr,
+               dirtyTowelIdx >= 0 ? dirtyTowelIdx : cleanTowelIdx);
+      pushStep(shIdx, "inv", "ms1", "dry", "leave", 24);
+      if (dirtyTowelIdx >= 0) {
+        auto dtTrick = level_.tricks.find("toi/dirtytowel");
+        pushStep(dirtyTowelIdx, "show_black", "inv", "ms", "ms", 30, "toi/towel",
+                 dtTrick != level_.tricks.end(), dtTrick != level_.tricks.end() ? &dtTrick->second : nullptr);
+      }
+      pushStep(shIdx, "inv", "ms1", "leave", "ms", 16);
+    }
+    return;
+  }
+  if (lowerName == "toi/toilet") {
+    pushStep(objIdx, "pee", "ms0", "", "ms", 36);
+    return;
+  }
+  if (lowerName == "lir/score") {
+    pushStep(objIdx, "inv", "ms3", "play", "ms", 45);
+    return;
+  }
+  if (lowerName == "lir/manipulatedscore") {
+    pushStep(objIdx, "inv", "inv", "play", "playslow_angry", 30);
+    pushStep(objIdx, "inv", "ms2", "playslow_angry", "ms", 36, "lir/score", isTricked, isTricked ? &trickIt->second : nullptr);
+    return;
+  }
+
+  // Season 1 Finale (level_suntan) objects
+  if (lowerName == "toi/toothbrushset") {
+    pushStep(objIdx, "take3", "brush_teeth", "", "ms", 12);
+    pushStep(objIdx, "brush_teeth", "ms2", "", "ms", 30);
+    return;
+  }
+  if (lowerName == "toi/shoebrushset") {
+    pushStep(objIdx, "take3", "brush_black_teeth", "", "ms", 12);
+    pushStep(objIdx, "brush_black_teeth", "show_black_teeth", "", "ms", 24);
+    pushStep(objIdx, "show_black_teeth", "ms2", "", "ms", 30, "toi/toothbrushset", isTricked, isTricked ? &trickIt->second : nullptr);
+    return;
+  }
+  if (lowerName == "kit/coffeebox") {
+    pushStep(objIdx, "use_mid", "drink_coffee", "brew", "ms", 20);
+    pushStep(objIdx, "drink_coffee", "ms2", "ms", "ms", 28);
+    return;
+  }
+  if (lowerName == "kit/coffeebox_soil") {
+    pushStep(objIdx, "use_mid", "drink_coffee_soil", "brew", "ms", 20);
+    pushStep(objIdx, "drink_coffee_soil", "spit", "ms", "ms", 24);
+    pushStep(objIdx, "spit", "ms1", "ms", "ms", 30, "kit/coffeebox", isTricked, isTricked ? &trickIt->second : nullptr);
+    return;
+  }
+  if (lowerName == "bal/ewer" || lowerName == "bal/ewer_poisoned" ||
+      lowerName == "bal/suncream" || lowerName == "bal/suncream_honey" || lowerName == "bal/suncream_oil") {
+    pushStep(objIdx, "take3", "ms1", "", "ms", 14);
+    return;
+  }
+  if (lowerName == "anc/flower") {
+    int poisIdx = findObjectIndex("bal/ewer_poisoned", "bal");
+    if (poisIdx >= 0) {
+      auto eTrick = level_.tricks.find("bal/ewer_poisoned");
+      pushStep(objIdx, "water_to_death", "ms2", "die", "ms", 36, "",
+               eTrick != level_.tricks.end(), eTrick != level_.tricks.end() ? &eTrick->second : nullptr, poisIdx);
+    } else {
+      pushStep(objIdx, "water", "ms3", "water", "ms", 28);
+    }
+    return;
+  }
+  if (lowerName == "bal/foldingchair") {
+    int honeyIdx = findObjectIndex("bal/suncream_honey", "bal");
+    int oilIdx = findObjectIndex("bal/suncream_oil", "bal");
+    if (honeyIdx >= 0) {
+      auto hTrick = level_.tricks.find("bal/suncream_honey");
+      pushStep(objIdx, "inv", "inv", "sunbath_cream", "beeattack", 28);
+      pushStep(objIdx, "inv", "ms2", "beeattack", "ms", 36, "",
+               hTrick != level_.tricks.end(), hTrick != level_.tricks.end() ? &hTrick->second : nullptr, honeyIdx);
+    } else if (oilIdx >= 0) {
+      auto oTrick = level_.tricks.find("bal/suncream_oil");
+      pushStep(objIdx, "inv", "ms1", "sunbath_oil", "ms", 36, "",
+               oTrick != level_.tricks.end(), oTrick != level_.tricks.end() ? &oTrick->second : nullptr, oilIdx);
+    } else {
+      pushStep(objIdx, "inv", "ms2", "sunbath", "ms", 36);
+    }
+    return;
+  }
+
+  // Season 3 (level_barbecue, level_laundry, level_fitness, level_DIY, level_hunter) sequences
+  if (lowerName == "bal/spray") {
+    pushStep(objIdx, "spray_plant", "ms1", "inv", "ms", 28);
+    return;
+  }
+  if (lowerName == "bal/growspray") {
+    int plantIdx = findObjectIndex("bal/plant", po.roomName);
+    pushStep(objIdx, "spray_plant_manipulated", "inv", "inv", "ms", 20, "bal/spray");
+    if (plantIdx >= 0) {
+      pushStep(plantIdx, "inv", "inv", "grow", "fight", 18);
+      pushStep(plantIdx, "inv", "ms2", "fight", "ms", 36, "", isTricked, isTricked ? &trickIt->second : nullptr);
+    }
+    return;
+  }
+  if (lowerName == "bal/noclothes") {
+    pushStep(objIdx, "use_mid", "ms2", "ms", "ms", 20, "bal/clothes");
+    return;
+  }
+  if (lowerName == "bal/clothes") {
+    pushStep(objIdx, "take3", "ms2", "ms", "ms", 16);
+    return;
+  }
+  if (lowerName == "bed/ironingboard") {
+    pushStep(objIdx, "iron", "give_short", "iron", "ms", 28);
+    pushStep(objIdx, "give_short", "ms0", "ms", "ms", 12, "bed/ironingboard_clothes");
+    return;
+  }
+  if (lowerName == "bed/ironingboard_clothes") {
+    pushStep(objIdx, "iron", "ms0", "iron", "ms", 28);
+    return;
+  }
+  if (lowerName == "anc/skippingrope") {
+    pushStep(objIdx, "take_low", "ropejump", "inv", "inv", 12);
+    pushStep(objIdx, "ropejump", "ms2", "ms", "ms", 32);
+    return;
+  }
+  if (lowerName == "anc/skippingrope_knotted") {
+    pushStep(objIdx, "take_low", "jumpcrash", "inv", "inv", 12);
+    pushStep(objIdx, "jumpcrash", "ms2", "ms", "ms", 36, "anc/skippingrope", isTricked, isTricked ? &trickIt->second : nullptr);
+    return;
+  }
+  if (lowerName == "kit/mixer") {
+    pushStep(objIdx, "mix", "drink", "mix", "drink", 24);
+    pushStep(objIdx, "drink", "ms1", "drink", "ms", 24);
+    return;
+  }
+  if (lowerName == "lir/stoolkit") {
+    int piecesIdx = findObjectIndex("lir/pieces", po.roomName);
+    pushStep(objIdx, "take_low", "inv", "ms", "ms", 12);
+    if (piecesIdx >= 0) {
+      pushStep(piecesIdx, "inv", "inv", "assemble", "disassemble", 30);
+      pushStep(piecesIdx, "inv", "ms2", "disassemble", "ms", 24);
+    }
+    return;
+  }
+  if (lowerName == "lir/stoolkit_glued") {
+    int piecesIdx = findObjectIndex("lir/pieces", po.roomName);
+    pushStep(objIdx, "take_low", "inv", "ms", "ms", 12, "lir/stoolkit");
+    if (piecesIdx >= 0) {
+      pushStep(piecesIdx, "inv", "ms2", "glue", "ms", 42, "", isTricked, isTricked ? &trickIt->second : nullptr);
+    }
+    return;
+  }
+  if (lowerName == "wor/ladder") {
+    pushStep(objIdx, "inv", "inv", "enter", "drill", 16);
+    pushStep(objIdx, "inv", "inv", "drill", "touch", 24);
+    pushStep(objIdx, "inv", "inv", "touch", "climb_down", 18);
+    pushStep(objIdx, "inv", "ms2", "climb_down", "ms", 16);
+    return;
+  }
+  if (lowerName == "wor/ladder_sawed") {
+    pushStep(objIdx, "inv", "ms2", "break", "ms", 40, "wor/ladder", isTricked, isTricked ? &trickIt->second : nullptr);
+    return;
+  }
+  if (lowerName == "lir/lockedphono") {
+    pushStep(objIdx, "use_mid", "ms0", "open", "ms", 20, "lir/phono_open");
+    return;
+  }
+  if (lowerName == "lir/phono_open") {
+    pushStep(objIdx, "use_mid", "listen", "play", "play", 16);
+    pushStep(objIdx, "listen", "ms0", "play", "ms", 30);
+    return;
+  }
+  if (lowerName == "lir/phono_nail") {
+    pushStep(objIdx, "use_mid", "listen_angry", "destroy", "ms", 20);
+    pushStep(objIdx, "listen_angry", "ms2", "ms", "ms", 32, "lir/phono_open", isTricked, isTricked ? &trickIt->second : nullptr);
+    return;
+  }
+  if (lowerName == "lir/tabacbox") {
+    pushStep(objIdx, "take", "smoke_pipe", "ms", "ms", 14);
+    pushStep(objIdx, "smoke_pipe", "ms2", "ms", "ms", 32);
+    return;
+  }
+  if (lowerName == "lir/tabacbox_powder") {
+    pushStep(objIdx, "take", "pipe_explo", "ms", "ms", 14);
+    pushStep(objIdx, "pipe_explo", "ms2", "ms", "ms", 36, "lir/tabacbox", isTricked, isTricked ? &trickIt->second : nullptr);
+    return;
+  }
+  if (lowerName == "bas/gun") {
+    pushStep(objIdx, "take_short", "aim_rifle", "inv", "inv", 12);
+    pushStep(objIdx, "aim_rifle", "give_short", "inv", "inv", 28);
+    pushStep(objIdx, "give_short", "ms2", "ms", "ms", 12);
+    return;
+  }
+  if (lowerName == "bas/gun_loaded" || lowerName == "bas/gun_bended") {
+    std::string trickAnim = (lowerName == "bas/gun_loaded") ? "shoot_rifle" : "rifle_explode";
+    pushStep(objIdx, "take_short", trickAnim, "inv", "inv", 12);
+    pushStep(objIdx, trickAnim, "ms2", "ms", "ms", 36, "bas/gun", isTricked, isTricked ? &trickIt->second : nullptr);
+    return;
+  }
+  if (lowerName == "bed/hat") {
+    pushStep(objIdx, "take_short", "pickhat", "inv", "inv", 12);
+    pushStep(objIdx, "pickhat", "putbackhat", "inv", "inv", 24);
+    pushStep(objIdx, "putbackhat", "ms2", "ms", "ms", 14);
+    return;
+  }
+  if (lowerName == "bed/hat_small") {
+    pushStep(objIdx, "take_short", "riphat", "inv", "inv", 12);
+    pushStep(objIdx, "riphat", "ms2", "ms", "ms", 36, "bed/hat", isTricked, isTricked ? &trickIt->second : nullptr);
+    return;
+  }
+  if (lowerName == "bed/medalbox") {
+    pushStep(objIdx, "take_short", "trymedals", "ms", "ms", 12);
+    pushStep(objIdx, "trymedals", "ms2", "ms", "ms", 28);
+    return;
+  }
+  if (lowerName == "bed/medalbox_trap") {
+    pushStep(objIdx, "take_short", "handrat", "ms", "ms", 12);
+    pushStep(objIdx, "handrat", "ms2", "ms", "ms", 36, "bed/medalbox", isTricked, isTricked ? &trickIt->second : nullptr);
+    return;
+  }
+  if (lowerName == "bal/woodhorn") {
+    pushStep(objIdx, "take_short", "blowhorn", "inv", "inv", 12);
+    pushStep(objIdx, "blowhorn", "give_short", "inv", "inv", 28);
+    pushStep(objIdx, "give_short", "ms2", "ms", "ms", 12);
+    return;
+  }
+  if (lowerName == "bal/woodhorn_balloon") {
+    pushStep(objIdx, "take_short", "blowballoon", "inv", "inv", 12);
+    pushStep(objIdx, "blowballoon", "ms2", "ms", "ms", 36, "bal/woodhorn", isTricked, isTricked ? &trickIt->second : nullptr);
+    return;
+  }
+
   // Container handling for Neighbor (e.g. kit/fridge on level_bath/level_pig: open -> take -> close)
   if (od->hasFlag("container")) {
     TaskStep stOpen{};
@@ -1766,37 +2124,43 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
     return;
   }
 
-  // Tricked object handling
+  // Tricked object handling (supports multi-step prank chains like anc/mailbox_trap on level_mail)
   if (isTricked) {
-    const ActionDef* prankAct = nullptr;
+    std::vector<const ActionDef*> prankActs;
     const ActionDef* cleanAct = nullptr;
     for (const ActionDef& a : od->actions) {
       if (toLowerAscii(a.actor) != "neighbor") continue;
       if (a.name == "clean" || a.name == "repair") cleanAct = &a;
-      else if (!prankAct) prankAct = &a;
+      else prankActs.push_back(&a);
     }
 
-    if (prankAct) {
-      bool destroysObject = (toLowerAscii(prankAct->objNextAnim) == "inv");
-      TaskStep st{};
-      st.type = TaskStep::Type::PlayAction;
-      st.objectIndex = objIdx;
-      st.actorAnim = prankAct->actorAnim.empty() ? "shout0" : prankAct->actorAnim;
-      st.actorNextAnim = prankAct->actorNextAnim.empty() ? "ms2" : prankAct->actorNextAnim;
-      st.objAnim = prankAct->objAnim;
-      st.objNextAnim = (prankAct->objNextAnim.empty() || destroysObject) ? "ms" : prankAct->objNextAnim;
-      if (prankAct->timeTicks > 0) {
-        st.durationTicks = prankAct->timeTicks;
-      } else if (st.actorAnim == "inv" && !st.objAnim.empty()) {
-        st.durationTicks = animFrameCount(od->gfx, st.objAnim, 45);
-      } else {
-        st.durationTicks = animFrameCount("neighbor", st.actorAnim, 36);
+    if (!prankActs.empty()) {
+      for (size_t i = 0; i < prankActs.size(); ++i) {
+        const ActionDef* prankAct = prankActs[i];
+        bool isLast = (i + 1 == prankActs.size());
+        bool destroysObject = isLast && (toLowerAscii(prankAct->objNextAnim) == "inv");
+        TaskStep st{};
+        st.type = TaskStep::Type::PlayAction;
+        st.objectIndex = objIdx;
+        st.actorAnim = prankAct->actorAnim.empty() ? "shout0" : prankAct->actorAnim;
+        st.actorNextAnim = prankAct->actorNextAnim.empty() ? (isLast ? "ms2" : st.actorAnim) : prankAct->actorNextAnim;
+        st.objAnim = prankAct->objAnim;
+        st.objNextAnim = (prankAct->objNextAnim.empty() || destroysObject) ? "ms" : prankAct->objNextAnim;
+        if (prankAct->timeTicks > 0) {
+          st.durationTicks = prankAct->timeTicks;
+        } else if (st.actorAnim == "inv" && !st.objAnim.empty()) {
+          st.durationTicks = animFrameCount(od->gfx, st.objAnim, 45);
+        } else {
+          st.durationTicks = animFrameCount("neighbor", st.actorAnim, 36);
+        }
+        if (isLast) {
+          st.triggerPrankScore = true;
+          st.trick = trickIt->second;
+          st.transformObjectTo = destroysObject ? std::string() : origName;
+          st.hideObjectOnFinish = destroysObject || origName.empty();
+        }
+        neighborQueue_.push_back(st);
       }
-      st.triggerPrankScore = true;
-      st.trick = trickIt->second;
-      st.transformObjectTo = destroysObject ? std::string() : origName;
-      st.hideObjectOnFinish = destroysObject || origName.empty();
-      neighborQueue_.push_back(st);
     } else {
       TaskStep shoutSt{};
       shoutSt.type = TaskStep::Type::PlayAction;
@@ -1828,16 +2192,21 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
     return;
   }
 
-  // Normal routine object interaction (supports chained multi-phase actions like kit/microwave in level_pie)
+  // Normal routine object interaction (supports chained multi-phase actions via actorNextAnim or objNextAnim)
   std::string expectedActorAnim;
+  std::string expectedObjAnim;
   for (const ActionDef& a : od->actions) {
     if (toLowerAscii(a.actor) != "neighbor" || a.name == "clean" || a.name == "repair") continue;
     if (!expectedActorAnim.empty() && toLowerAscii(a.actorAnim) != toLowerAscii(expectedActorAnim)) break;
+    if (expectedActorAnim.empty() && !expectedObjAnim.empty() &&
+        toLowerAscii(a.objAnim) != toLowerAscii(expectedObjAnim)) {
+      break;
+    }
     TaskStep st{};
     st.type = TaskStep::Type::PlayAction;
     st.objectIndex = objIdx;
     st.actorAnim = a.actorAnim.empty() ? "use_mid" : a.actorAnim;
-    st.actorNextAnim = a.actorNextAnim.empty() ? "ms2" : a.actorNextAnim;
+    st.actorNextAnim = a.actorNextAnim.empty() ? (st.actorAnim == "inv" ? "inv" : "ms2") : a.actorNextAnim;
     st.objAnim = a.objAnim;
     st.objNextAnim = a.objNextAnim.empty() ? "ms" : a.objNextAnim;
     if (a.timeTicks > 0) {
@@ -1848,8 +2217,12 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
       st.durationTicks = animFrameCount("neighbor", st.actorAnim, 24);
     }
     expectedActorAnim = a.actorNextAnim;
+    expectedObjAnim = a.objNextAnim;
+    bool endsHere = (!expectedActorAnim.empty() && expectedActorAnim.rfind("ms", 0) == 0) ||
+                    (expectedActorAnim.empty() && (expectedObjAnim.empty() || expectedObjAnim == "ms"));
+    if (endsHere && st.actorNextAnim == "inv") st.actorNextAnim = "ms2";
     neighborQueue_.push_back(st);
-    if (expectedActorAnim.empty() || expectedActorAnim.rfind("ms", 0) == 0) break;
+    if (endsHere) break;
   }
 }
 
@@ -2024,6 +2397,16 @@ void GameEngine::updateNeighbor() {
               po.animFrame = 0;
             }
           }
+          if (step.outObjectIndex >= 0 && step.outObjectIndex < (int)level_.objects.size()) {
+            PlacedObject& secPo = level_.objects[step.outObjectIndex];
+            secPo.currentAnim = "ms";
+            secPo.nextAnim = "ms";
+            secPo.animFrame = 0;
+            std::string secLower = toLowerAscii(secPo.name);
+            if (secLower == "bed/cactusclock") secPo.name = "bed/alarmclock";
+            else if (secLower == "bal/ewer_poisoned") secPo.name = "bal/ewer";
+            else if (secLower == "bal/suncream_honey" || secLower == "bal/suncream_oil") secPo.name = "bal/suncream";
+          }
           neighbor_.hidden = false;
           neighbor_.currentAnim = step.actorNextAnim.empty() ? "ms2" : step.actorNextAnim;
           neighbor_.nextAnim = neighbor_.currentAnim;
@@ -2033,7 +2416,10 @@ void GameEngine::updateNeighbor() {
         }
         if (step.elapsedTicks == 0) {
           if (step.triggerPrankScore && step.objectIndex >= 0 && step.objectIndex < (int)level_.objects.size()) {
-            awardPrankScore(level_.objects[step.objectIndex].name, step.trick);
+            int scoreIdx = (step.outObjectIndex >= 0 && step.outObjectIndex < (int)level_.objects.size())
+                               ? step.outObjectIndex
+                               : step.objectIndex;
+            awardPrankScore(level_.objects[scoreIdx].name, step.trick);
           }
           if (step.actorAnim == "inv") {
             neighbor_.hidden = true;
@@ -2049,6 +2435,19 @@ void GameEngine::updateNeighbor() {
             po.currentAnim = step.objAnim;
             po.nextAnim = step.objNextAnim;
             po.animFrame = 0;
+          }
+          if (step.outObjectIndex >= 0 && step.outObjectIndex < (int)level_.objects.size()) {
+            PlacedObject& secPo = level_.objects[step.outObjectIndex];
+            std::string secLower = toLowerAscii(secPo.name);
+            if (secLower == "bed/alarmclock" || secLower == "bed/cactusclock") {
+              secPo.currentAnim = "ring";
+              secPo.nextAnim = "ms";
+              secPo.animFrame = 0;
+            } else if (secLower == "toi/towel" || secLower == "toi/dirtytowel") {
+              secPo.currentAnim = "inv";
+              secPo.nextAnim = "ms";
+              secPo.animFrame = 0;
+            }
           }
         }
         step.elapsedTicks++;
