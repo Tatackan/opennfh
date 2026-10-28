@@ -209,6 +209,7 @@ class GameEngine {
   SDL_FRect worldToScreen(float wx, float wy, float ww, float wh) const;
 
   GameOptions opts_;
+  std::string pendingScreenshotFile_;
   SDL_Window* window_ = nullptr;
   SDL_Renderer* ren_ = nullptr;
   bool audioOk_ = false;

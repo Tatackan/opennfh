@@ -1026,7 +1026,7 @@ void GameEngine::onLeftClick(int worldX, int worldY, int screenX, int screenY, b
     }
   }
 
-  // Preserve active non-interruptible step (e.g. mid-door traversal or mid-hideout exit/entry)
+  // Preserve active non-interruptible step (e.g. mid-door traversal or mid-hideout exit/entry or active trick/prank)
   if (!woodyQueue_.empty()) {
     const TaskStep& front = woodyQueue_.front();
     bool keepFront = (front.type == TaskStep::Type::TraverseDoor && front.elapsedTicks > 0) ||
@@ -1039,7 +1039,13 @@ void GameEngine::onLeftClick(int worldX, int worldY, int screenX, int screenY, b
       if (front.type == TaskStep::Type::PlayAction && front.objectIndex >= 0 &&
           front.objectIndex < (int)level_.objects.size()) {
         PlacedObject& po = level_.objects[front.objectIndex];
-        if (po.currentAnim == "open") po.currentAnim = "ms";
+        po.currentAnim = "ms";
+        po.nextAnim = "ms";
+        po.animFrame = 0;
+      }
+      if (woody_.hidingInObject < 0) {
+        woody_.hidden = false;
+        if (woody_.currentAnim == "inv") woody_.currentAnim = "ms2";
       }
       woodyQueue_.clear();
       woodyActionTicks_ = woodyActionTotalTicks_ = 0;
@@ -1273,6 +1279,10 @@ void GameEngine::updateWoody() {
 
     switch (step.type) {
       case TaskStep::Type::WalkToX: {
+        woodyBusyInAnim_ = false;
+        if (woody_.hidingInObject < 0 && woody_.hidden) {
+          woody_.hidden = false;
+        }
         int dx = step.targetX - woody_.pos.x;
         int dy = (step.targetY > 0 ? step.targetY : woody_.pos.y) - woody_.pos.y;
         if (dx == 0 && dy == 0) {
@@ -1640,6 +1650,7 @@ void GameEngine::updateWoody() {
         doCombo.objNextAnim = "ms";
         doCombo.durationTicks = std::max(1, actTicks);
         doCombo.showProgressBar = true;
+        doCombo.nonInterruptible = true;
         doCombo.applyComboOnFinish = true;
         doCombo.combo = combo;
 
@@ -2585,6 +2596,7 @@ void GameEngine::checkStealthDetection() {
       woody_.room = "fro";
       woody_.pos = Point{105, 218};
       woody_.hidden = false;
+      woody_.hidingInObject = -1;
       woody_.currentAnim = "ms2";
       woody_.nextAnim = "ms2";
       woody_.animFrame = 0;
@@ -2597,10 +2609,21 @@ void GameEngine::checkStealthDetection() {
     return;
   }
 
-  if (woody_.hidden || neighbor_.hidden) return;
+  bool woodyTrulyHidden = (woody_.hidden && woody_.hidingInObject >= 0);
+  if (woodyTrulyHidden || neighbor_.hidden) return;
   if (toLowerAscii(woody_.room) != toLowerAscii(neighbor_.room)) return;
 
   // Caught in the same room!
+  if (!woodyQueue_.empty()) {
+    const TaskStep& front = woodyQueue_.front();
+    if (front.type == TaskStep::Type::PlayAction && front.objectIndex >= 0 &&
+        front.objectIndex < (int)level_.objects.size()) {
+      PlacedObject& po = level_.objects[front.objectIndex];
+      po.currentAnim = "ms";
+      po.nextAnim = "ms";
+      po.animFrame = 0;
+    }
+  }
   catchSequenceActive_ = true;
   catchTicks_ = animFrameCount("neighbor", "kill1", 28);
   woodyQueue_.clear();
@@ -3612,6 +3635,10 @@ void GameEngine::render() {
 
   renderConfirmModal();
   renderCursor();
+  if (!pendingScreenshotFile_.empty()) {
+    saveScreenshot(pendingScreenshotFile_);
+    pendingScreenshotFile_.clear();
+  }
   SDL_RenderPresent(ren_);
 }
 
@@ -3759,17 +3786,17 @@ int GameEngine::run() {
       if (!opts_.recordDir.empty()) {
         fs::create_directories(pathFromUtf8(opts_.recordDir));
         if (simulatedTicks == 1 || (simulatedTicks % opts_.recordStride) == 0) {
-          render();
           char frameBuf[64];
           std::snprintf(frameBuf, sizeof frameBuf, "/frame_%05d.png", simulatedTicks);
-          saveScreenshot(opts_.recordDir + frameBuf);
+          pendingScreenshotFile_ = opts_.recordDir + frameBuf;
+          render();
         }
       }
 
       if (simulatedTicks >= opts_.screenshotTicks) {
         if (!opts_.screenshot.empty()) {
+          pendingScreenshotFile_ = opts_.screenshot;
           render();
-          saveScreenshot(opts_.screenshot);
         }
         running_ = false;
         break;
@@ -3789,7 +3816,8 @@ int GameEngine::run() {
     render();
 
     if (!opts_.screenshot.empty() && simulatedTicks >= opts_.screenshotTicks) {
-      saveScreenshot(opts_.screenshot);
+      pendingScreenshotFile_ = opts_.screenshot;
+      render();
       running_ = false;
       break;
     }
