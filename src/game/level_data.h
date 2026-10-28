@@ -171,6 +171,7 @@ struct LevelData {
   std::unordered_map<std::string, ObjectDef> objectDefs;
   std::unordered_map<std::string, InventarDef> inventar;
   std::unordered_map<std::string, std::string> icons;  // icon name -> vpath
+  std::vector<std::string> levelIcons;                 // ordered routine icons from <level>/objects.xml
   std::unordered_map<std::string, TrickDef> tricks;
   std::vector<CombinationDef> combinations;
   std::vector<TriggerDef> triggers;

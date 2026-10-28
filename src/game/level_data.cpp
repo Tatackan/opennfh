@@ -133,7 +133,8 @@ ActionDef parseActionNode(const XmlNode* actNode) {
   a.objAnim = actNode->attrOr("objanim");
   a.objNextAnim = actNode->attrOr("objnextanim");
   std::string t = actNode->attrOr("time");
-  a.timeTicks = (t.empty() || t == "auto") ? 0 : actNode->attrInt("time", 0);
+  int rawTime = (t.empty() || t == "auto") ? 0 : actNode->attrInt("time", 0);
+  a.timeTicks = rawTime > 0 ? (rawTime + 1) : 0;  // original XML time="11" = 0..11 inclusive (12 ticks = 1.0s)
   a.noise = actNode->attrInt("noise", 0);
   return a;
 }
@@ -144,7 +145,14 @@ void parseObjectsXml(const XmlDocument& doc, LevelData& out) {
     if (n->name == "icon") {
       std::string name = toLowerAscii(n->attrOr("name"));
       std::string gfx = n->attrOr("gfx");
-      if (!name.empty() && !gfx.empty()) out.icons[name] = "gfx/" + gfx;
+      if (!name.empty() && !gfx.empty()) {
+        out.icons[name] = "gfx/" + gfx;
+        if (name != "noise" && name != "shout" && name != "chili_shout" && name != "dog_shout") {
+          if (std::find(out.levelIcons.begin(), out.levelIcons.end(), name) == out.levelIcons.end()) {
+            out.levelIcons.push_back(name);
+          }
+        }
+      }
     } else if (n->name == "inventar") {
       InventarDef inv;
       inv.name = n->attrOr("name");

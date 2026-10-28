@@ -61,6 +61,7 @@ class GameEngine {
     };
     Type type = Type::WalkToX;
     int targetX = 0;
+    int targetY = 0;
     bool sneak = false;
 
     // TraverseDoor fields
@@ -97,6 +98,7 @@ class GameEngine {
     std::string room;
     std::string normalObj;
     std::string trickObj;
+    std::string fallbackObj;
     std::string iconName;
     bool onlyWhenTricked = false;
   };
@@ -126,6 +128,7 @@ class GameEngine {
   void checkStealthDetection();
   void awardPrankScore(const std::string& objName, const TrickDef& trick);
   void enqueueNeighborObjectActions(int objIdx);
+  void enqueueRoomWalk(std::deque<TaskStep>& q, const std::string& roomName, Point& curPos, Point targetPos, bool sneak);
 
   // --- player commands ---
   void updateHover(int worldX, int worldY, int screenX, int screenY);

@@ -268,6 +268,21 @@ void GameEngine::buildNeighborRoutine() {
   routineIdx_ = 0;
   currentBubbleIcon_.clear();
 
+  auto stripUnderscores = [](const std::string& s) {
+    std::string out;
+    for (char c : s)
+      if (c != '_') out.push_back(c);
+    return out;
+  };
+
+  struct Candidate {
+    RoutineStop stop;
+    std::string shortRaw;
+    std::string shortNorm;
+    bool used = false;
+  };
+  std::vector<Candidate> candidates;
+
   for (const PlacedObject& po : level_.objects) {
     if (po.isDoor) continue;
     const ObjectDef* od = level_.findObjectDef(po.name);
@@ -299,24 +314,60 @@ void GameEngine::buildNeighborRoutine() {
     }
 
     if (!hasNormalNeighborAct && !hasTrickNeighborAct) continue;
+    // kit/window is a fallback for kit/binoculars after superglue destroys the binoculars
+    if (toLowerAscii(po.name) == "kit/window") continue;
 
     RoutineStop stop;
     stop.room = po.roomName;
     stop.normalObj = po.name;
     stop.trickObj = trickObjName;
+    if (toLowerAscii(po.name) == "kit/binoculars") stop.fallbackObj = "kit/window";
     stop.onlyWhenTricked = !hasNormalNeighborAct;
 
     size_t slash = po.name.find('/');
-    std::string shortName = toLowerAscii(slash == std::string::npos ? po.name : po.name.substr(slash + 1));
-    if (level_.icons.count(shortName)) stop.iconName = shortName;
-    else if (!level_.icons.empty()) stop.iconName = level_.icons.begin()->first;
-    routine_.push_back(std::move(stop));
+    std::string shortRaw = toLowerAscii(slash == std::string::npos ? po.name : po.name.substr(slash + 1));
+    std::string shortNorm = stripUnderscores(shortRaw);
+    stop.iconName = shortRaw;
+    candidates.push_back(Candidate{std::move(stop), shortRaw, shortNorm, false});
   }
-  for (const auto& st : routine_) {
-    if (!st.onlyWhenTricked && !st.iconName.empty()) {
-      currentBubbleIcon_ = st.iconName;
-      break;
+
+  // 1. Match normal routine stops in the exact order of <icon> tags in <level>/objects.xml
+  for (const std::string& icon : level_.levelIcons) {
+    std::string iconNorm = stripUnderscores(icon);
+    int matched = -1;
+    for (size_t i = 0; i < candidates.size(); ++i) {
+      if (candidates[i].used || candidates[i].stop.onlyWhenTricked) continue;
+      const std::string& sr = candidates[i].shortRaw;
+      const std::string& sn = candidates[i].shortNorm;
+      if (sr == icon || sn == iconNorm ||
+          (icon == "milk_bottle" && (sr == "fridge" || sr == "milkbottle")) ||
+          (icon == "mail" && sr == "mailbox") ||
+          (icon == "parrot" && sr == "chili") ||
+          (icon == "ironing" && sn.find("ironing") != std::string::npos) ||
+          (icon == "smoke" && sn.find("pipe") != std::string::npos)) {
+        matched = (int)i;
+        break;
+      }
     }
+    if (matched >= 0) {
+      candidates[matched].used = true;
+      candidates[matched].stop.iconName = icon;
+      routine_.push_back(candidates[matched].stop);
+    }
+  }
+
+  // 2. Fallback if a level had no explicit <icon> tags (e.g. tutorial_1)
+  if (routine_.empty()) {
+    for (auto& c : candidates) {
+      if (!c.stop.onlyWhenTricked && c.shortRaw != "fridge") {
+        c.used = true;
+        routine_.push_back(c.stop);
+      }
+    }
+  }
+
+  if (!routine_.empty()) {
+    currentBubbleIcon_ = routine_[0].iconName;
   }
 }
 
@@ -525,14 +576,47 @@ void GameEngine::updateHover(int worldX, int worldY, int screenX, int screenY) {
   }
 }
 
+void GameEngine::enqueueRoomWalk(std::deque<TaskStep>& q, const std::string& roomName, Point& curPos, Point targetPos,
+                                 bool sneak) {
+  const RoomDef* r = level_.findRoom(roomName);
+  int pathY = (r && r->path1.y > 0) ? r->path1.y : (curPos.y > 0 ? curPos.y : 420);
+  if (r) {
+    int lo = std::min(r->path1.x, r->path2.x);
+    int hi = std::max(r->path1.x, r->path2.x);
+    if (hi > lo) targetPos.x = std::clamp(targetPos.x, lo, hi);
+  }
+  if (targetPos.y <= 0) targetPos.y = pathY;
+
+  auto pushSeg = [&](int tx, int ty) {
+    if (curPos.x == tx && curPos.y == ty) return;
+    TaskStep w{};
+    w.type = TaskStep::Type::WalkToX;
+    w.targetX = tx;
+    w.targetY = ty;
+    w.sneak = sneak;
+    q.push_back(w);
+    curPos = Point{tx, ty};
+  };
+
+  if (curPos.x != targetPos.x) {
+    if (curPos.y != pathY) pushSeg(curPos.x, pathY);
+    pushSeg(targetPos.x, pathY);
+    if (targetPos.y != pathY) pushSeg(targetPos.x, targetPos.y);
+  } else {
+    pushSeg(targetPos.x, targetPos.y);
+  }
+}
+
 void GameEngine::queuePathToRoom(const std::string& destRoom, bool sneak) {
   std::string curRoom = woody_.room;
-  if (!woodyQueue_.empty()) {
-    for (auto it = woodyQueue_.rbegin(); it != woodyQueue_.rend(); ++it) {
-      if (!it->targetRoom.empty()) {
-        curRoom = it->targetRoom;
-        break;
-      }
+  Point curPos = woody_.pos;
+  for (const TaskStep& st : woodyQueue_) {
+    if (st.type == TaskStep::Type::TraverseDoor && !st.targetRoom.empty()) {
+      curRoom = st.targetRoom;
+      curPos = st.outPos;
+    } else if (st.type == TaskStep::Type::WalkToX) {
+      curPos.x = st.targetX;
+      if (st.targetY > 0) curPos.y = st.targetY;
     }
   }
   auto edges = findRoomPath(curRoom, destRoom);
@@ -541,17 +625,12 @@ void GameEngine::queuePathToRoom(const std::string& destRoom, bool sneak) {
     const ObjectDef* dOut = level_.findObjectDef(e.doorOut);
     int inIdx = findObjectIndex(e.doorIn, curRoom);
     int outIdx = findObjectIndex(e.doorOut, e.targetRoom);
-    Point inPos = dIn ? dIn->hotspotOr("woody", Point{450, 400}) : Point{450, 400};
+    Point inPos = dIn ? dIn->hotspotOr("woody", Point{450, 420}) : Point{450, 420};
     if (inIdx >= 0) {
       inPos.x += level_.objects[inIdx].position.x;
       inPos.y += level_.objects[inIdx].position.y;
     }
-    if (const RoomDef* rIn = level_.findRoom(curRoom)) {
-      int lo = std::min(rIn->path1.x, rIn->path2.x);
-      int hi = std::max(rIn->path1.x, rIn->path2.x);
-      if (hi > lo) inPos.x = std::clamp(inPos.x, lo, hi);
-    }
-    Point outPos = dOut ? dOut->hotspotOr("woody_out", dOut->hotspotOr("woody", Point{450, 400})) : Point{450, 400};
+    Point outPos = dOut ? dOut->hotspotOr("woody_out", dOut->hotspotOr("woody", Point{450, 420})) : Point{450, 420};
     if (outIdx >= 0) {
       outPos.x += level_.objects[outIdx].position.x;
       outPos.y += level_.objects[outIdx].position.y;
@@ -562,11 +641,7 @@ void GameEngine::queuePathToRoom(const std::string& destRoom, bool sneak) {
       if (hi > lo) outPos.x = std::clamp(outPos.x, lo, hi);
     }
 
-    TaskStep walk{};
-    walk.type = TaskStep::Type::WalkToX;
-    walk.targetX = inPos.x;
-    walk.sneak = sneak;
-    woodyQueue_.push_back(walk);
+    enqueueRoomWalk(woodyQueue_, curRoom, curPos, inPos, sneak);
 
     // Synchronized door traversal: doorIn (woody_enter) and doorOut (woody_leave) start together at tick 0!
     TaskStep doorStep{};
@@ -581,12 +656,13 @@ void GameEngine::queuePathToRoom(const std::string& destRoom, bool sneak) {
     int leaveFrames = dOut ? animFrameCount(dOut->gfx, "woody_leave", 24) : 24;
     if (dIn) {
       if (const ActionDef* aEn = dIn->findAction("enter", "woody")) {
-        if (aEn->timeTicks > 0) enterFrames = aEn->timeTicks;
+        if (aEn->timeTicks > 0) enterFrames = std::max(enterFrames, aEn->timeTicks);
       }
     }
     if (dOut) {
       if (const ActionDef* aLv = dOut->findAction("leave", "woody")) {
         if (!aLv->actorNextAnim.empty()) doorStep.outAnim = aLv->actorNextAnim;
+        if (aLv->timeTicks > 0) leaveFrames = std::max(leaveFrames, aLv->timeTicks);
       }
     }
     doorStep.enterTicks = std::max(1, enterFrames);
@@ -594,6 +670,7 @@ void GameEngine::queuePathToRoom(const std::string& destRoom, bool sneak) {
     woodyQueue_.push_back(doorStep);
 
     curRoom = e.targetRoom;
+    curPos = outPos;
   }
 }
 
@@ -664,6 +741,18 @@ void GameEngine::onLeftClick(int worldX, int worldY, int screenX, int screenY, b
   const std::string heldItem =
       (selectedInv_ >= 0 && selectedInv_ < (int)inventory_.size()) ? inventory_[selectedInv_] : std::string();
 
+  auto currentWoodyEndPos = [&]() {
+    Point p = woody_.pos;
+    for (const TaskStep& st : woodyQueue_) {
+      if (st.type == TaskStep::Type::TraverseDoor) p = st.outPos;
+      else if (st.type == TaskStep::Type::WalkToX) {
+        p.x = st.targetX;
+        if (st.targetY > 0) p.y = st.targetY;
+      }
+    }
+    return p;
+  };
+
   if (hoveredObject_ >= 0) {
     const PlacedObject& po = level_.objects[hoveredObject_];
     const ObjectDef* od = level_.findObjectDef(po.name);
@@ -708,16 +797,13 @@ void GameEngine::onLeftClick(int worldX, int worldY, int screenX, int screenY, b
       }
     }
 
-    Point targetPos = od ? od->hotspotOr("woody", Point{450, 400}) : Point{450, 400};
+    Point targetPos = od ? od->hotspotOr("woody", Point{450, 420}) : Point{450, 420};
     targetPos.x += po.position.x;
     targetPos.y += po.position.y;
 
     queuePathToRoom(po.roomName, doubleClick);
-    TaskStep walk{};
-    walk.type = TaskStep::Type::WalkToX;
-    walk.targetX = targetPos.x;
-    walk.sneak = doubleClick;
-    woodyQueue_.push_back(walk);
+    Point curPos = currentWoodyEndPos();
+    enqueueRoomWalk(woodyQueue_, po.roomName, curPos, targetPos, doubleClick);
 
     if (combo && combo->isTrick) {
       TaskStep apply{};
@@ -740,16 +826,14 @@ void GameEngine::onLeftClick(int worldX, int worldY, int screenX, int screenY, b
     const RoomDef* r = level_.findRoom(hoveredRoom_);
     if (!r) return;
     int localX = std::clamp(worldX - r->offset.x, std::min(r->path1.x, r->path2.x), std::max(r->path1.x, r->path2.x));
+    int pathY = r->path1.y > 0 ? r->path1.y : 420;
 
     if (!heldItem.empty()) {
       const CombinationDef* combo = findCombination(hoveredRoom_, heldItem);
       if (combo && combo->isTrick) {
         queuePathToRoom(hoveredRoom_, doubleClick);
-        TaskStep walk{};
-        walk.type = TaskStep::Type::WalkToX;
-        walk.targetX = localX;
-        walk.sneak = doubleClick;
-        woodyQueue_.push_back(walk);
+        Point curPos = currentWoodyEndPos();
+        enqueueRoomWalk(woodyQueue_, hoveredRoom_, curPos, Point{localX, pathY}, doubleClick);
 
         TaskStep apply{};
         apply.type = TaskStep::Type::ApplyCombination;
@@ -767,11 +851,8 @@ void GameEngine::onLeftClick(int worldX, int worldY, int screenX, int screenY, b
     }
 
     queuePathToRoom(hoveredRoom_, doubleClick);
-    TaskStep walk{};
-    walk.type = TaskStep::Type::WalkToX;
-    walk.targetX = localX;
-    walk.sneak = doubleClick;
-    woodyQueue_.push_back(walk);
+    Point curPos = currentWoodyEndPos();
+    enqueueRoomWalk(woodyQueue_, hoveredRoom_, curPos, Point{localX, pathY}, doubleClick);
   }
 }
 
@@ -805,8 +886,9 @@ void GameEngine::advanceObjectAnims() {
       if (anim.loop) {
         po.animFrame = 0;
       } else {
-        po.currentAnim = po.nextAnim.empty() ? "ms" : po.nextAnim;
-        po.animFrame = 0;
+        // Hold last frame while an active PlayAction/TraverseDoor step owns this object;
+        // the step itself transitions po.currentAnim at the exact completion tick.
+        po.animFrame = (int)anim.frames.size() - 1;
       }
     }
   }
@@ -837,8 +919,7 @@ void GameEngine::advanceActorAnim(ActorState& a, bool* finishedOut) {
     if (anim.loop) {
       a.animFrame = 0;
     } else {
-      a.currentAnim = a.nextAnim.empty() ? "ms2" : a.nextAnim;
-      a.animFrame = 0;
+      a.animFrame = (int)anim.frames.size() - 1;
       if (finishedOut) *finishedOut = true;
     }
   }
@@ -848,317 +929,371 @@ void GameEngine::updateWoody() {
   bool animDone = false;
   advanceActorAnim(woody_, &animDone);
 
-  if (woodyQueue_.empty()) return;
-  TaskStep& step = woodyQueue_.front();
+  while (!woodyQueue_.empty()) {
+    TaskStep& step = woodyQueue_.front();
 
-  switch (step.type) {
-    case TaskStep::Type::WalkToX: {
-      int dx = step.targetX - woody_.pos.x;
-      std::string want = (dx >= 0) ? (step.sneak ? "sn1" : "mg1") : (step.sneak ? "sn3" : "mg3");
-      int speed = actorSpeed("woody", want, step.sneak ? 5 : 17);
-      if (std::abs(dx) <= speed) {
-        woody_.pos.x = step.targetX;
-        woody_.currentAnim = (dx >= 0) ? "ms1" : "ms3";
-        woody_.nextAnim = woody_.currentAnim;
-        woody_.animFrame = 0;
-        woodyQueue_.pop_front();
-      } else {
-        woody_.pos.x += (dx > 0 ? speed : -speed);
-        if (woody_.currentAnim != want) {
-          woody_.currentAnim = want;
-          woody_.nextAnim = want;
-          woody_.animFrame = 0;
+    switch (step.type) {
+      case TaskStep::Type::WalkToX: {
+        int dx = step.targetX - woody_.pos.x;
+        int dy = (step.targetY > 0 ? step.targetY : woody_.pos.y) - woody_.pos.y;
+        if (dx == 0 && dy == 0) {
+          woodyQueue_.pop_front();
+          if (woodyQueue_.empty()) {
+            woody_.currentAnim = "ms2";
+            woody_.nextAnim = "ms2";
+            woody_.animFrame = 0;
+          }
+          continue;
         }
+        if (std::abs(dx) > 0) {
+          std::string want = (dx > 0) ? (step.sneak ? "sn1" : "mg1") : (step.sneak ? "sn3" : "mg3");
+          int speed = actorSpeed("woody", want, step.sneak ? 5 : 17);
+          if (woody_.currentAnim != want) {
+            woody_.currentAnim = want;
+            woody_.nextAnim = want;
+            woody_.animFrame = 0;
+          }
+          if (std::abs(dx) <= speed) {
+            woody_.pos.x = step.targetX;
+            if (dy == 0) {
+              std::string stopAnim = (dx > 0) ? "ms1" : "ms3";
+              woodyQueue_.pop_front();
+              if (woodyQueue_.empty()) {
+                woody_.currentAnim = stopAnim;
+                woody_.nextAnim = stopAnim;
+                woody_.animFrame = 0;
+              }
+              continue;
+            }
+          } else {
+            woody_.pos.x += (dx > 0 ? speed : -speed);
+          }
+        } else {
+          std::string want = (dy < 0) ? (step.sneak ? "sn0" : "mg0") : (step.sneak ? "sn2" : "mg2");
+          int speed = actorSpeed("woody", want, step.sneak ? 2 : 6);
+          if (woody_.currentAnim != want) {
+            woody_.currentAnim = want;
+            woody_.nextAnim = want;
+            woody_.animFrame = 0;
+          }
+          if (std::abs(dy) <= speed) {
+            woody_.pos.y = step.targetY;
+            std::string stopAnim = (dy < 0) ? "ms0" : "ms2";
+            woodyQueue_.pop_front();
+            if (woodyQueue_.empty()) {
+              woody_.currentAnim = stopAnim;
+              woody_.nextAnim = stopAnim;
+              woody_.animFrame = 0;
+            }
+            continue;
+          } else {
+            woody_.pos.y += (dy > 0 ? speed : -speed);
+          }
+        }
+        return;
       }
-      break;
-    }
 
-    case TaskStep::Type::TraverseDoor: {
-      if (step.elapsedTicks == 0) {
-        woody_.hidden = true;
-        if (step.objectIndex >= 0 && step.objectIndex < (int)level_.objects.size()) {
-          PlacedObject& doorIn = level_.objects[step.objectIndex];
-          doorIn.currentAnim = "woody_enter";
-          doorIn.nextAnim = "ms";
-          doorIn.animFrame = 0;
-        }
-        if (step.outObjectIndex >= 0 && step.outObjectIndex < (int)level_.objects.size()) {
-          PlacedObject& doorOut = level_.objects[step.outObjectIndex];
-          doorOut.currentAnim = "woody_leave";
-          doorOut.nextAnim = "ms";
-          doorOut.animFrame = 0;
-        }
-      }
-      step.elapsedTicks++;
-      if (step.elapsedTicks == step.enterTicks) {
-        woody_.room = step.targetRoom;
-        woody_.pos = step.outPos;
-      }
-      if (step.elapsedTicks >= step.totalTicks) {
-        woody_.room = step.targetRoom;
-        woody_.pos = step.outPos;
-        woody_.hidden = false;
-        woody_.currentAnim = step.outAnim;
-        woody_.nextAnim = step.outAnim;
-        woody_.animFrame = 0;
-        woodyQueue_.pop_front();
-      }
-      break;
-    }
-
-    case TaskStep::Type::PlayAction: {
-      if (step.elapsedTicks == 0) {
-        if (step.actorAnim == "inv") {
-          woody_.hidden = true;
-          woody_.currentAnim = "inv";
-        } else if (!step.actorAnim.empty()) {
+      case TaskStep::Type::TraverseDoor: {
+        if (step.elapsedTicks >= step.totalTicks) {
+          if (step.objectIndex >= 0 && step.objectIndex < (int)level_.objects.size()) {
+            PlacedObject& doorIn = level_.objects[step.objectIndex];
+            doorIn.currentAnim = "ms";
+            doorIn.nextAnim = "ms";
+            doorIn.animFrame = 0;
+          }
+          if (step.outObjectIndex >= 0 && step.outObjectIndex < (int)level_.objects.size()) {
+            PlacedObject& doorOut = level_.objects[step.outObjectIndex];
+            doorOut.currentAnim = "ms";
+            doorOut.nextAnim = "ms";
+            doorOut.animFrame = 0;
+          }
+          woody_.room = step.targetRoom;
+          woody_.pos = step.outPos;
           woody_.hidden = false;
-          woody_.currentAnim = step.actorAnim;
-          woody_.nextAnim = step.actorNextAnim;
+          woody_.currentAnim = step.outAnim;
+          woody_.nextAnim = step.outAnim;
           woody_.animFrame = 0;
+          woodyQueue_.pop_front();
+          continue;
         }
-        if (step.objectIndex >= 0 && step.objectIndex < (int)level_.objects.size() && !step.objAnim.empty()) {
-          PlacedObject& po = level_.objects[step.objectIndex];
-          po.currentAnim = step.objAnim;
-          po.nextAnim = step.objNextAnim;
-          po.animFrame = 0;
+        if (step.elapsedTicks == 0) {
+          woody_.hidden = true;
+          if (step.objectIndex >= 0 && step.objectIndex < (int)level_.objects.size()) {
+            PlacedObject& doorIn = level_.objects[step.objectIndex];
+            doorIn.currentAnim = "woody_enter";
+            doorIn.nextAnim = "ms";
+            doorIn.animFrame = 0;
+          }
+          if (step.outObjectIndex >= 0 && step.outObjectIndex < (int)level_.objects.size()) {
+            PlacedObject& doorOut = level_.objects[step.outObjectIndex];
+            doorOut.currentAnim = "woody_leave";
+            doorOut.nextAnim = "ms";
+            doorOut.animFrame = 0;
+          }
         }
-        if (step.showProgressBar) {
-          woodyActionTotalTicks_ = std::max(1, step.durationTicks);
-          woodyActionTicks_ = woodyActionTotalTicks_;
+        step.elapsedTicks++;
+        if (step.elapsedTicks == step.enterTicks) {
+          woody_.room = step.targetRoom;
+          woody_.pos = step.outPos;
         }
+        return;
       }
-      step.elapsedTicks++;
-      if (step.showProgressBar && woodyActionTicks_ > 0) woodyActionTicks_--;
 
-      if (step.elapsedTicks >= step.durationTicks) {
-        if (step.showProgressBar) {
-          woodyActionTicks_ = woodyActionTotalTicks_ = 0;
+      case TaskStep::Type::PlayAction: {
+        if (step.elapsedTicks >= step.durationTicks) {
+          if (step.showProgressBar) {
+            woodyActionTicks_ = woodyActionTotalTicks_ = 0;
+          }
+          if (step.objectIndex >= 0 && step.objectIndex < (int)level_.objects.size()) {
+            PlacedObject& po = level_.objects[step.objectIndex];
+            if (!step.objNextAnim.empty()) {
+              po.currentAnim = step.objNextAnim;
+              po.nextAnim = step.objNextAnim;
+              po.animFrame = 0;
+            }
+            if (step.giveContainerItems && !po.items.empty()) {
+              std::string gained;
+              for (const std::string& it : po.items) {
+                if (std::find(inventory_.begin(), inventory_.end(), it) == inventory_.end()) {
+                  inventory_.push_back(it);
+                }
+                std::string n = level_.getString(it, "name");
+                if (!gained.empty()) gained += ", ";
+                gained += n.empty() ? it : n;
+              }
+              po.items.clear();
+              playSfx("sfx/give_take2.wav");
+              statusBanner_ = "Получено: " + gained;
+              bannerTicks_ = kTicksPerSecond * 3;
+            }
+            if (step.applyComboOnFinish && step.combo.removeTarget) {
+              po.name = step.combo.resultObject;
+              po.currentAnim = "ms";
+              po.nextAnim = "ms";
+              po.animFrame = 0;
+            }
+          } else if (step.applyComboOnFinish && !step.targetRoom.empty()) {
+            PlacedObject trap;
+            trap.name = step.combo.resultObject;
+            trap.roomName = step.targetRoom;
+            trap.layer = 2;
+            trap.position = Point{step.targetX, 415};
+            trap.visible = true;
+            level_.objects.push_back(std::move(trap));
+          }
+
+          if (step.applyComboOnFinish) {
+            if (!step.combo.item.empty() && step.combo.removeItem) {
+              auto it = std::find(inventory_.begin(), inventory_.end(), step.combo.item);
+              if (it != inventory_.end()) inventory_.erase(it);
+            }
+            std::string trickTitle = level_.getString(step.combo.resultObject, "name");
+            statusBanner_ = "Пакость готова: " + (trickTitle.empty() ? step.combo.resultObject : trickTitle) + "!";
+            bannerTicks_ = kTicksPerSecond * 3;
+          }
+
+          if (step.enterHideout) {
+            woody_.hidden = true;
+            woody_.hidingInObject = step.objectIndex;
+            statusBanner_ = "Вуди спрятался! Кликните в любое место, чтобы выйти.";
+            bannerTicks_ = kTicksPerSecond * 3;
+          } else if (step.leaveHideout) {
+            woody_.hidden = false;
+            woody_.hidingInObject = -1;
+            woody_.currentAnim = step.actorNextAnim.empty() ? "ms2" : step.actorNextAnim;
+            woody_.nextAnim = woody_.currentAnim;
+            woody_.animFrame = 0;
+          } else {
+            woody_.hidden = false;
+            woody_.currentAnim = step.actorNextAnim.empty() ? "ms2" : step.actorNextAnim;
+            woody_.nextAnim = woody_.currentAnim;
+            woody_.animFrame = 0;
+          }
+          woodyQueue_.pop_front();
+          continue;
         }
-        if (step.objectIndex >= 0 && step.objectIndex < (int)level_.objects.size()) {
-          PlacedObject& po = level_.objects[step.objectIndex];
-          if (!step.objNextAnim.empty()) {
-            po.currentAnim = step.objNextAnim;
+
+        if (step.elapsedTicks == 0) {
+          if (step.actorAnim == "inv") {
+            woody_.hidden = true;
+            woody_.currentAnim = "inv";
+          } else if (!step.actorAnim.empty()) {
+            woody_.hidden = false;
+            woody_.currentAnim = step.actorAnim;
+            woody_.nextAnim = step.actorNextAnim;
+            woody_.animFrame = 0;
+          }
+          if (step.objectIndex >= 0 && step.objectIndex < (int)level_.objects.size() && !step.objAnim.empty()) {
+            PlacedObject& po = level_.objects[step.objectIndex];
+            po.currentAnim = step.objAnim;
             po.nextAnim = step.objNextAnim;
             po.animFrame = 0;
           }
-          if (step.giveContainerItems && !po.items.empty()) {
-            std::string gained;
-            for (const std::string& it : po.items) {
-              if (std::find(inventory_.begin(), inventory_.end(), it) == inventory_.end()) {
-                inventory_.push_back(it);
-              }
-              std::string n = level_.getString(it, "name");
-              if (!gained.empty()) gained += ", ";
-              gained += n.empty() ? it : n;
-            }
-            po.items.clear();
-            playSfx("sfx/give_take2.wav");
-            statusBanner_ = "Получено: " + gained;
+          if (step.showProgressBar) {
+            woodyActionTotalTicks_ = std::max(1, step.durationTicks);
+            woodyActionTicks_ = woodyActionTotalTicks_;
+          }
+        }
+        step.elapsedTicks++;
+        if (step.showProgressBar && woodyActionTicks_ > 0) woodyActionTicks_--;
+        return;
+      }
+
+      case TaskStep::Type::InteractObject: {
+        int idx = step.objectIndex;
+        woodyQueue_.pop_front();
+        if (idx < 0 || idx >= (int)level_.objects.size()) continue;
+        PlacedObject& po = level_.objects[idx];
+        const ObjectDef* od = level_.findObjectDef(po.name);
+        if (!od) continue;
+
+        if (od->hasFlag("hideout")) {
+          int enFrames = animFrameCount(od->gfx, "woody_enter", 20);
+          TaskStep hideStep{};
+          hideStep.type = TaskStep::Type::PlayAction;
+          hideStep.objectIndex = idx;
+          hideStep.actorAnim = "inv";
+          hideStep.objAnim = "woody_enter";
+          hideStep.objNextAnim = "ms";
+          hideStep.durationTicks = enFrames;
+          hideStep.nonInterruptible = true;
+          hideStep.enterHideout = true;
+          woodyQueue_.push_front(hideStep);
+        } else if (od->hasFlag("container") || !po.items.empty()) {
+          const ActionDef* aOpen = od->findAction("open", "woody");
+          const ActionDef* aTake = od->findAction("take", "woody");
+          const ActionDef* aClose = od->findAction("close", "woody");
+
+          std::string openActorAnim = (aOpen && !aOpen->actorAnim.empty()) ? aOpen->actorAnim : "";
+          std::string openObjAnim = (aOpen && !aOpen->objAnim.empty()) ? aOpen->objAnim : "";
+          std::string takeActorAnim = (aTake && !aTake->actorAnim.empty()) ? aTake->actorAnim : "take0";
+          std::string closeActorAnim = (aClose && !aClose->actorAnim.empty()) ? aClose->actorAnim : "";
+          std::string finalNextAnim = (aClose && !aClose->actorNextAnim.empty())
+                                          ? aClose->actorNextAnim
+                                          : ((aTake && !aTake->actorNextAnim.empty()) ? aTake->actorNextAnim : "ms0");
+
+          std::vector<TaskStep> seq;
+          if (!openActorAnim.empty() || !openObjAnim.empty()) {
+            TaskStep stOpen{};
+            stOpen.type = TaskStep::Type::PlayAction;
+            stOpen.objectIndex = idx;
+            stOpen.actorAnim = openActorAnim;
+            stOpen.actorNextAnim = finalNextAnim;
+            stOpen.objAnim = openObjAnim;
+            stOpen.objNextAnim = openObjAnim.empty() ? "ms" : openObjAnim;
+            stOpen.durationTicks = animFrameCount("woody", openActorAnim, 10);
+            seq.push_back(stOpen);
+          }
+          if (!po.items.empty()) {
+            TaskStep stTake{};
+            stTake.type = TaskStep::Type::PlayAction;
+            stTake.objectIndex = idx;
+            stTake.actorAnim = takeActorAnim;
+            stTake.actorNextAnim = finalNextAnim;
+            stTake.objAnim = openObjAnim;
+            stTake.objNextAnim = openObjAnim.empty() ? "ms" : openObjAnim;
+            stTake.durationTicks = animFrameCount("woody", takeActorAnim, 12);
+            stTake.giveContainerItems = true;
+            seq.push_back(stTake);
+          } else {
+            statusBanner_ = "Пусто!";
+            bannerTicks_ = kTicksPerSecond * 2;
+          }
+          if (!closeActorAnim.empty() || !openObjAnim.empty()) {
+            TaskStep stClose{};
+            stClose.type = TaskStep::Type::PlayAction;
+            stClose.objectIndex = idx;
+            stClose.actorAnim = closeActorAnim.empty() ? "close" : closeActorAnim;
+            stClose.actorNextAnim = finalNextAnim;
+            stClose.objAnim = "ms";
+            stClose.objNextAnim = "ms";
+            stClose.durationTicks = animFrameCount("woody", stClose.actorAnim, 10);
+            seq.push_back(stClose);
+          }
+          for (auto it = seq.rbegin(); it != seq.rend(); ++it) woodyQueue_.push_front(*it);
+        } else {
+          std::string desc = level_.getString(po.name, "description");
+          if (desc.empty()) desc = level_.getString(po.name, "name");
+          if (!desc.empty()) {
+            statusBanner_ = desc;
             bannerTicks_ = kTicksPerSecond * 3;
           }
-          if (step.applyComboOnFinish && step.combo.removeTarget) {
-            po.name = step.combo.resultObject;
-            po.currentAnim = "ms";
-            po.nextAnim = "ms";
-            po.animFrame = 0;
-          }
-        } else if (step.applyComboOnFinish && !step.targetRoom.empty()) {
-          PlacedObject trap;
-          trap.name = step.combo.resultObject;
-          trap.roomName = step.targetRoom;
-          trap.layer = 2;
-          trap.position = Point{step.targetX, 415};
-          trap.visible = true;
-          level_.objects.push_back(std::move(trap));
+          TaskStep lookStep{};
+          lookStep.type = TaskStep::Type::PlayAction;
+          lookStep.actorAnim = "smile";
+          lookStep.actorNextAnim = "ms2";
+          lookStep.durationTicks = animFrameCount("woody", "smile", 14);
+          woodyQueue_.push_front(lookStep);
         }
+        continue;
+      }
 
-        if (step.applyComboOnFinish) {
-          if (!step.combo.item.empty() && step.combo.removeItem) {
-            auto it = std::find(inventory_.begin(), inventory_.end(), step.combo.item);
-            if (it != inventory_.end()) inventory_.erase(it);
-          }
-          std::string trickTitle = level_.getString(step.combo.resultObject, "name");
-          statusBanner_ = "Пакость готова: " + (trickTitle.empty() ? step.combo.resultObject : trickTitle) + "!";
-          bannerTicks_ = kTicksPerSecond * 3;
-        }
-
-        if (step.enterHideout) {
-          woody_.hidden = true;
-          woody_.hidingInObject = step.objectIndex;
-          statusBanner_ = "Вуди спрятался! Кликните в любое место, чтобы выйти.";
-          bannerTicks_ = kTicksPerSecond * 3;
-        } else if (step.leaveHideout) {
-          woody_.hidden = false;
-          woody_.hidingInObject = -1;
-          woody_.currentAnim = step.actorNextAnim.empty() ? "ms2" : step.actorNextAnim;
-          woody_.nextAnim = woody_.currentAnim;
-          woody_.animFrame = 0;
-        } else {
-          woody_.hidden = false;
-          woody_.currentAnim = step.actorNextAnim.empty() ? "ms2" : step.actorNextAnim;
-          woody_.nextAnim = woody_.currentAnim;
-          woody_.animFrame = 0;
-        }
+      case TaskStep::Type::ApplyCombination: {
+        CombinationDef combo = step.combo;
+        int idx = step.objectIndex;
+        std::string roomName = step.targetRoom;
+        int dropX = step.targetX;
         woodyQueue_.pop_front();
-      }
-      break;
-    }
 
-    case TaskStep::Type::InteractObject: {
-      int idx = step.objectIndex;
-      woodyQueue_.pop_front();
-      if (idx < 0 || idx >= (int)level_.objects.size()) break;
-      PlacedObject& po = level_.objects[idx];
-      const ObjectDef* od = level_.findObjectDef(po.name);
-      if (!od) break;
+        std::string actActorAnim = "use_mid";
+        std::string actNextAnim = "smile";
+        std::string actObjAnim;
+        int actTicks = 12;
 
-      if (od->hasFlag("hideout")) {
-        int enFrames = animFrameCount(od->gfx, "woody_enter", 20);
-        TaskStep hideStep{};
-        hideStep.type = TaskStep::Type::PlayAction;
-        hideStep.objectIndex = idx;
-        hideStep.actorAnim = "inv";
-        hideStep.objAnim = "woody_enter";
-        hideStep.objNextAnim = "ms";
-        hideStep.durationTicks = enFrames;
-        hideStep.nonInterruptible = true;
-        hideStep.enterHideout = true;
-        woodyQueue_.push_front(hideStep);
-      } else if (od->hasFlag("container") || !po.items.empty()) {
-        const ActionDef* aOpen = od->findAction("open", "woody");
-        const ActionDef* aTake = od->findAction("take", "woody");
-        const ActionDef* aClose = od->findAction("close", "woody");
-
-        std::string openActorAnim = (aOpen && !aOpen->actorAnim.empty()) ? aOpen->actorAnim : "";
-        std::string openObjAnim = (aOpen && !aOpen->objAnim.empty()) ? aOpen->objAnim : "";
-        std::string takeActorAnim = (aTake && !aTake->actorAnim.empty()) ? aTake->actorAnim : "take0";
-        std::string closeActorAnim = (aClose && !aClose->actorAnim.empty()) ? aClose->actorAnim : "";
-        std::string finalNextAnim = (aClose && !aClose->actorNextAnim.empty())
-                                        ? aClose->actorNextAnim
-                                        : ((aTake && !aTake->actorNextAnim.empty()) ? aTake->actorNextAnim : "ms0");
-
-        std::vector<TaskStep> seq;
-        if (!openActorAnim.empty() || !openObjAnim.empty()) {
-          TaskStep stOpen{};
-          stOpen.type = TaskStep::Type::PlayAction;
-          stOpen.objectIndex = idx;
-          stOpen.actorAnim = openActorAnim;
-          stOpen.actorNextAnim = finalNextAnim;
-          stOpen.objAnim = openObjAnim;
-          stOpen.objNextAnim = openObjAnim.empty() ? "ms" : openObjAnim;
-          stOpen.durationTicks = animFrameCount("woody", openActorAnim, 10);
-          seq.push_back(stOpen);
-        }
-        if (!po.items.empty()) {
-          TaskStep stTake{};
-          stTake.type = TaskStep::Type::PlayAction;
-          stTake.objectIndex = idx;
-          stTake.actorAnim = takeActorAnim;
-          stTake.actorNextAnim = finalNextAnim;
-          stTake.objAnim = openObjAnim;
-          stTake.objNextAnim = openObjAnim.empty() ? "ms" : openObjAnim;
-          stTake.durationTicks = animFrameCount("woody", takeActorAnim, 12);
-          stTake.giveContainerItems = true;
-          seq.push_back(stTake);
-        } else {
-          statusBanner_ = "Пусто!";
-          bannerTicks_ = kTicksPerSecond * 2;
-        }
-        if (!closeActorAnim.empty() || !openObjAnim.empty()) {
-          TaskStep stClose{};
-          stClose.type = TaskStep::Type::PlayAction;
-          stClose.objectIndex = idx;
-          stClose.actorAnim = closeActorAnim.empty() ? "close" : closeActorAnim;
-          stClose.actorNextAnim = finalNextAnim;
-          stClose.objAnim = "ms";
-          stClose.objNextAnim = "ms";
-          stClose.durationTicks = animFrameCount("woody", stClose.actorAnim, 10);
-          seq.push_back(stClose);
-        }
-        for (auto it = seq.rbegin(); it != seq.rend(); ++it) woodyQueue_.push_front(*it);
-      } else {
-        std::string desc = level_.getString(po.name, "description");
-        if (desc.empty()) desc = level_.getString(po.name, "name");
-        if (!desc.empty()) {
-          statusBanner_ = desc;
-          bannerTicks_ = kTicksPerSecond * 3;
-        }
-        TaskStep lookStep{};
-        lookStep.type = TaskStep::Type::PlayAction;
-        lookStep.actorAnim = "smile";
-        lookStep.actorNextAnim = "ms2";
-        lookStep.durationTicks = animFrameCount("woody", "smile", 14);
-        woodyQueue_.push_front(lookStep);
-      }
-      break;
-    }
-
-    case TaskStep::Type::ApplyCombination: {
-      CombinationDef combo = step.combo;
-      int idx = step.objectIndex;
-      std::string roomName = step.targetRoom;
-      int dropX = step.targetX;
-      woodyQueue_.pop_front();
-
-      std::string actActorAnim = "use_mid";
-      std::string actNextAnim = "smile";
-      std::string actObjAnim;
-      int actTicks = 12;
-
-      if (idx >= 0 && idx < (int)level_.objects.size()) {
-        const PlacedObject& po = level_.objects[idx];
-        if (const ObjectDef* od = level_.findObjectDef(po.name)) {
-          const ActionDef* a = !combo.item.empty() ? od->findAction(combo.item, "woody") : nullptr;
-          if (!a) a = od->findAction("use", "woody");
-          if (!a) {
-            for (const ActionDef& cand : od->actions) {
-              if (toLowerAscii(cand.actor) == "woody") {
-                a = &cand;
-                break;
+        if (idx >= 0 && idx < (int)level_.objects.size()) {
+          const PlacedObject& po = level_.objects[idx];
+          if (const ObjectDef* od = level_.findObjectDef(po.name)) {
+            const ActionDef* a = !combo.item.empty() ? od->findAction(combo.item, "woody") : nullptr;
+            if (!a) a = od->findAction("use", "woody");
+            if (!a) {
+              for (const ActionDef& cand : od->actions) {
+                if (toLowerAscii(cand.actor) == "woody") {
+                  a = &cand;
+                  break;
+                }
+              }
+            }
+            if (a) {
+              if (!a->actorAnim.empty()) actActorAnim = a->actorAnim;
+              if (!a->actorNextAnim.empty()) actNextAnim = a->actorNextAnim;
+              if (!a->objAnim.empty()) actObjAnim = a->objAnim;
+              if (a->timeTicks > 0) {
+                actTicks = a->timeTicks;
+              } else if (!actObjAnim.empty() && actObjAnim != "ms") {
+                actTicks = animFrameCount(od->gfx, actObjAnim, 16);
+              } else {
+                actTicks = animFrameCount("woody", actActorAnim, 14);
               }
             }
           }
-          if (a) {
-            if (!a->actorAnim.empty()) actActorAnim = a->actorAnim;
-            if (!a->actorNextAnim.empty()) actNextAnim = a->actorNextAnim;
-            if (!a->objAnim.empty()) actObjAnim = a->objAnim;
-            if (a->timeTicks > 0) {
-              actTicks = a->timeTicks;
-            } else if (!actObjAnim.empty() && actObjAnim != "ms") {
-              actTicks = animFrameCount(od->gfx, actObjAnim, 16);
-            } else {
-              actTicks = animFrameCount("woody", actActorAnim, 14);
-            }
-          }
         }
+
+        playSfx("sfx/use1.wav");
+
+        TaskStep smileStep{};
+        smileStep.type = TaskStep::Type::PlayAction;
+        smileStep.actorAnim = actNextAnim;
+        smileStep.actorNextAnim = "ms2";
+        smileStep.durationTicks = animFrameCount("woody", actNextAnim, 14);
+
+        TaskStep doCombo{};
+        doCombo.type = TaskStep::Type::PlayAction;
+        doCombo.objectIndex = idx;
+        doCombo.targetRoom = roomName;
+        doCombo.targetX = dropX;
+        doCombo.actorAnim = actActorAnim;
+        doCombo.actorNextAnim = actNextAnim;
+        doCombo.objAnim = actObjAnim;
+        doCombo.objNextAnim = "ms";
+        doCombo.durationTicks = std::max(1, actTicks);
+        doCombo.showProgressBar = true;
+        doCombo.applyComboOnFinish = true;
+        doCombo.combo = combo;
+
+        woodyQueue_.push_front(smileStep);
+        woodyQueue_.push_front(doCombo);
+        continue;
       }
-
-      playSfx("sfx/use1.wav");
-
-      TaskStep smileStep{};
-      smileStep.type = TaskStep::Type::PlayAction;
-      smileStep.actorAnim = actNextAnim;
-      smileStep.actorNextAnim = "ms2";
-      smileStep.durationTicks = animFrameCount("woody", actNextAnim, 14);
-
-      TaskStep doCombo{};
-      doCombo.type = TaskStep::Type::PlayAction;
-      doCombo.objectIndex = idx;
-      doCombo.targetRoom = roomName;
-      doCombo.targetX = dropX;
-      doCombo.actorAnim = actActorAnim;
-      doCombo.actorNextAnim = actNextAnim;
-      doCombo.objAnim = actObjAnim;
-      doCombo.objNextAnim = "ms";
-      doCombo.durationTicks = std::max(1, actTicks);
-      doCombo.showProgressBar = true;
-      doCombo.applyComboOnFinish = true;
-      doCombo.combo = combo;
-
-      woodyQueue_.push_front(smileStep);
-      woodyQueue_.push_front(doCombo);
-      break;
     }
   }
 }
@@ -1198,27 +1333,28 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
   const bool isTricked = (trickIt != level_.tricks.end());
   const std::string origName = isTricked ? objectOriginalName(po.name) : std::string();
 
-  // Special multi-phase handling for armchair (lir/sofa and lir/sofa_fartbag)
-  if (lowerName == "lir/sofa" || lowerName == "lir/sofa_fartbag") {
+  // Special multi-phase handling for armchair (lir/sofa, lir/sofa_fartbag, lir/sofa_broken)
+  if (lowerName == "lir/sofa" || lowerName == "lir/sofa_fartbag" || lowerName == "lir/sofa_broken") {
     TaskStep enterSt{};
     enterSt.type = TaskStep::Type::PlayAction;
     enterSt.objectIndex = objIdx;
     enterSt.actorAnim = "inv";
     enterSt.actorNextAnim = "ms3";
     enterSt.objAnim = "neighbor_enter";
-    enterSt.objNextAnim = isTricked ? "neighbor_surprise" : "neighbor_sit_remo";
+    enterSt.objNextAnim = isTricked ? (lowerName == "lir/sofa_broken" ? "neighbor_fall" : "neighbor_surprise") : "neighbor_sit_remo";
     enterSt.durationTicks = animFrameCount(od->gfx, "neighbor_enter", 6);
     neighborQueue_.push_back(enterSt);
 
     if (isTricked) {
+      std::string surpAnim = (lowerName == "lir/sofa_broken") ? "neighbor_fall" : "neighbor_surprise";
       TaskStep surpSt{};
       surpSt.type = TaskStep::Type::PlayAction;
       surpSt.objectIndex = objIdx;
       surpSt.actorAnim = "inv";
       surpSt.actorNextAnim = "ms3";
-      surpSt.objAnim = "neighbor_surprise";
+      surpSt.objAnim = surpAnim;
       surpSt.objNextAnim = "ms";
-      surpSt.durationTicks = animFrameCount(od->gfx, "neighbor_surprise", 36);
+      surpSt.durationTicks = animFrameCount(od->gfx, surpAnim, 36);
       surpSt.triggerPrankScore = true;
       surpSt.trick = trickIt->second;
       surpSt.transformObjectTo = origName.empty() ? "lir/sofa" : origName;
@@ -1233,14 +1369,18 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
       remoSt.durationTicks = animFrameCount(od->gfx, "neighbor_sit_remo", 27);
       neighborQueue_.push_back(remoSt);
 
-      TaskStep sitSt{};
-      sitSt.type = TaskStep::Type::PlayAction;
-      sitSt.objectIndex = objIdx;
-      sitSt.actorAnim = "inv";
-      sitSt.objAnim = "neighbor_sit";
-      sitSt.objNextAnim = "neighbor_leave";
-      sitSt.durationTicks = animFrameCount(od->gfx, "neighbor_sit", 32);
-      neighborQueue_.push_back(sitSt);
+      // If TV antenna was twisted (lir/twistedantenna exists in lir), Neighbor gets up immediately to fix it!
+      int tvTrickIdx = findObjectIndex("lir/twistedantenna", po.roomName);
+      if (tvTrickIdx < 0) {
+        TaskStep sitSt{};
+        sitSt.type = TaskStep::Type::PlayAction;
+        sitSt.objectIndex = objIdx;
+        sitSt.actorAnim = "inv";
+        sitSt.objAnim = "neighbor_sit";
+        sitSt.objNextAnim = "neighbor_leave";
+        sitSt.durationTicks = animFrameCount(od->gfx, "neighbor_sit", 32);
+        neighborQueue_.push_back(sitSt);
+      }
 
       TaskStep leaveSt{};
       leaveSt.type = TaskStep::Type::PlayAction;
@@ -1252,10 +1392,26 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
       leaveSt.durationTicks = animFrameCount(od->gfx, "neighbor_leave", 6);
       neighborQueue_.push_back(leaveSt);
     }
+
+    // After getting up from the sofa, if lir/twistedantenna is active in the room, walk over and repair it!
+    int tvTrickIdx = findObjectIndex("lir/twistedantenna", po.roomName);
+    if (tvTrickIdx >= 0) {
+      const PlacedObject& tvPo = level_.objects[tvTrickIdx];
+      const ObjectDef* tvOd = level_.findObjectDef(tvPo.name);
+      Point tvHs = tvOd ? tvOd->hotspotOr("neighbor", Point{200, 420}) : Point{200, 420};
+      tvHs.x += tvPo.position.x;
+      tvHs.y += tvPo.position.y;
+      Point curPos = neighbor_.pos;
+      enqueueRoomWalk(neighborQueue_, po.roomName, curPos, tvHs, false);
+      TaskStep fixTv{};
+      fixTv.type = TaskStep::Type::InteractObject;
+      fixTv.objectIndex = tvTrickIdx;
+      neighborQueue_.push_back(fixTv);
+    }
     return;
   }
 
-  // Container handling for Neighbor (e.g. kit/fridge: open -> take -> close)
+  // Container handling for Neighbor (e.g. kit/fridge on level_bath/level_pig: open -> take -> close)
   if (od->hasFlag("container")) {
     TaskStep stOpen{};
     stOpen.type = TaskStep::Type::PlayAction;
@@ -1264,7 +1420,7 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
     stOpen.actorNextAnim = "ms0";
     stOpen.objAnim = "open";
     stOpen.objNextAnim = "open";
-    stOpen.durationTicks = animFrameCount("neighbor", "open", 10);
+    stOpen.durationTicks = animFrameCount("neighbor", "open", 4);
     neighborQueue_.push_back(stOpen);
 
     TaskStep stTake{};
@@ -1274,7 +1430,7 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
     stTake.actorNextAnim = "ms0";
     stTake.objAnim = "open";
     stTake.objNextAnim = "open";
-    stTake.durationTicks = animFrameCount("neighbor", "take", 12);
+    stTake.durationTicks = animFrameCount("neighbor", "take", 16);
     neighborQueue_.push_back(stTake);
 
     TaskStep stClose{};
@@ -1284,7 +1440,7 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
     stClose.actorNextAnim = "ms0";
     stClose.objAnim = "ms";
     stClose.objNextAnim = "ms";
-    stClose.durationTicks = animFrameCount("neighbor", "close", 10);
+    stClose.durationTicks = animFrameCount("neighbor", "close", 4);
     neighborQueue_.push_back(stClose);
     return;
   }
@@ -1300,13 +1456,14 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
     }
 
     if (prankAct) {
+      bool destroysObject = (toLowerAscii(prankAct->objNextAnim) == "inv");
       TaskStep st{};
       st.type = TaskStep::Type::PlayAction;
       st.objectIndex = objIdx;
       st.actorAnim = prankAct->actorAnim.empty() ? "shout0" : prankAct->actorAnim;
       st.actorNextAnim = prankAct->actorNextAnim.empty() ? "ms2" : prankAct->actorNextAnim;
       st.objAnim = prankAct->objAnim;
-      st.objNextAnim = (prankAct->objNextAnim.empty() || prankAct->objNextAnim == "inv") ? "ms" : prankAct->objNextAnim;
+      st.objNextAnim = (prankAct->objNextAnim.empty() || destroysObject) ? "ms" : prankAct->objNextAnim;
       if (prankAct->timeTicks > 0) {
         st.durationTicks = prankAct->timeTicks;
       } else if (st.actorAnim == "inv" && !st.objAnim.empty()) {
@@ -1316,8 +1473,8 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
       }
       st.triggerPrankScore = true;
       st.trick = trickIt->second;
-      st.transformObjectTo = origName;
-      st.hideObjectOnFinish = origName.empty();
+      st.transformObjectTo = destroysObject ? std::string() : origName;
+      st.hideObjectOnFinish = destroysObject || origName.empty();
       neighborQueue_.push_back(st);
     } else {
       TaskStep shoutSt{};
@@ -1325,7 +1482,7 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
       shoutSt.objectIndex = objIdx;
       shoutSt.actorAnim = "shout0";
       shoutSt.actorNextAnim = "ms0";
-      shoutSt.durationTicks = animFrameCount("neighbor", "shout0", 24);
+      shoutSt.durationTicks = animFrameCount("neighbor", "shout0", 26);
       shoutSt.triggerPrankScore = true;
       shoutSt.trick = trickIt->second;
       if (!cleanAct) {
@@ -1341,7 +1498,7 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
         clSt.actorAnim = cleanAct->actorAnim.empty() ? "use_mid" : cleanAct->actorAnim;
         clSt.actorNextAnim = cleanAct->actorNextAnim.empty() ? "ms0" : cleanAct->actorNextAnim;
         clSt.durationTicks = cleanAct->timeTicks > 0 ? cleanAct->timeTicks
-                                                     : animFrameCount("neighbor", clSt.actorAnim, 23);
+                                                     : animFrameCount("neighbor", clSt.actorAnim, 24);
         clSt.transformObjectTo = origName;
         clSt.hideObjectOnFinish = origName.empty();
         neighborQueue_.push_back(clSt);
@@ -1350,9 +1507,11 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
     return;
   }
 
-  // Normal routine object interaction (e.g. kit/binoculars peep, kit/whippedcream put_cream, etc.)
+  // Normal routine object interaction (supports chained multi-phase actions like kit/microwave in level_pie)
+  std::string expectedActorAnim;
   for (const ActionDef& a : od->actions) {
     if (toLowerAscii(a.actor) != "neighbor" || a.name == "clean" || a.name == "repair") continue;
+    if (!expectedActorAnim.empty() && toLowerAscii(a.actorAnim) != toLowerAscii(expectedActorAnim)) break;
     TaskStep st{};
     st.type = TaskStep::Type::PlayAction;
     st.objectIndex = objIdx;
@@ -1367,8 +1526,9 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
     } else {
       st.durationTicks = animFrameCount("neighbor", st.actorAnim, 24);
     }
+    expectedActorAnim = a.actorNextAnim;
     neighborQueue_.push_back(st);
-    break;
+    if (expectedActorAnim.empty() || expectedActorAnim.rfind("ms", 0) == 0) break;
   }
 }
 
@@ -1400,41 +1560,109 @@ void GameEngine::updateNeighbor() {
       }
       if (isPassTrigger) {
         const ObjectDef* od = level_.findObjectDef(po.name);
-        int hx = po.position.x + (od ? od->hotspotOr("neighbor", Point{neighbor_.pos.x, 420}).x : neighbor_.pos.x);
-        if (std::abs(neighbor_.pos.x - hx) <= 60) {
+        Point hs = od ? od->hotspotOr("neighbor", Point{neighbor_.pos.x, 420}) : Point{neighbor_.pos.x, 420};
+        hs.x += po.position.x;
+        hs.y += po.position.y;
+        if (std::abs(neighbor_.pos.x - hs.x) <= 75) {
           neighborQueue_.clear();
-          enqueueNeighborObjectActions((int)i);
-          return;
+          Point curPos = neighbor_.pos;
+          enqueueRoomWalk(neighborQueue_, neighbor_.room, curPos, hs, false);
+          TaskStep inter{};
+          inter.type = TaskStep::Type::InteractObject;
+          inter.objectIndex = (int)i;
+          neighborQueue_.push_back(inter);
+          break;
         }
       }
     }
   }
 
-  if (!neighborQueue_.empty()) {
+  while (!neighborQueue_.empty()) {
     TaskStep& step = neighborQueue_.front();
     switch (step.type) {
       case TaskStep::Type::WalkToX: {
         int dx = step.targetX - neighbor_.pos.x;
-        std::string want = (dx >= 0) ? "mg1" : "mg3";
-        int speed = actorSpeed("neighbor", want, 8);
-        if (std::abs(dx) <= speed) {
-          neighbor_.pos.x = step.targetX;
-          neighbor_.currentAnim = (dx >= 0) ? "ms1" : "ms3";
-          neighbor_.nextAnim = neighbor_.currentAnim;
-          neighbor_.animFrame = 0;
+        int dy = (step.targetY > 0 ? step.targetY : neighbor_.pos.y) - neighbor_.pos.y;
+        if (dx == 0 && dy == 0) {
           neighborQueue_.pop_front();
-        } else {
-          neighbor_.pos.x += (dx > 0 ? speed : -speed);
+          if (neighborQueue_.empty()) {
+            neighbor_.currentAnim = "ms2";
+            neighbor_.nextAnim = "ms2";
+            neighbor_.animFrame = 0;
+          }
+          continue;
+        }
+        if (std::abs(dx) > 0) {
+          std::string want = (dx > 0) ? "mg1" : "mg3";
+          int speed = actorSpeed("neighbor", want, 8);
           if (neighbor_.currentAnim != want) {
             neighbor_.currentAnim = want;
             neighbor_.nextAnim = want;
             neighbor_.animFrame = 0;
           }
+          if (std::abs(dx) <= speed) {
+            neighbor_.pos.x = step.targetX;
+            if (dy == 0) {
+              std::string stopAnim = (dx > 0) ? "ms1" : "ms3";
+              neighborQueue_.pop_front();
+              if (neighborQueue_.empty()) {
+                neighbor_.currentAnim = stopAnim;
+                neighbor_.nextAnim = stopAnim;
+                neighbor_.animFrame = 0;
+              }
+              continue;
+            }
+          } else {
+            neighbor_.pos.x += (dx > 0 ? speed : -speed);
+          }
+        } else {
+          std::string want = (dy < 0) ? "mg0" : "mg2";
+          int speed = actorSpeed("neighbor", want, 3);
+          if (neighbor_.currentAnim != want) {
+            neighbor_.currentAnim = want;
+            neighbor_.nextAnim = want;
+            neighbor_.animFrame = 0;
+          }
+          if (std::abs(dy) <= speed) {
+            neighbor_.pos.y = step.targetY;
+            std::string stopAnim = (dy < 0) ? "ms0" : "ms2";
+            neighborQueue_.pop_front();
+            if (neighborQueue_.empty()) {
+              neighbor_.currentAnim = stopAnim;
+              neighbor_.nextAnim = stopAnim;
+              neighbor_.animFrame = 0;
+            }
+            continue;
+          } else {
+            neighbor_.pos.y += (dy > 0 ? speed : -speed);
+          }
         }
-        break;
+        return;
       }
 
       case TaskStep::Type::TraverseDoor: {
+        if (step.elapsedTicks >= step.totalTicks) {
+          if (step.objectIndex >= 0 && step.objectIndex < (int)level_.objects.size()) {
+            PlacedObject& doorIn = level_.objects[step.objectIndex];
+            doorIn.currentAnim = "ms";
+            doorIn.nextAnim = "ms";
+            doorIn.animFrame = 0;
+          }
+          if (step.outObjectIndex >= 0 && step.outObjectIndex < (int)level_.objects.size()) {
+            PlacedObject& doorOut = level_.objects[step.outObjectIndex];
+            doorOut.currentAnim = "ms";
+            doorOut.nextAnim = "ms";
+            doorOut.animFrame = 0;
+          }
+          neighbor_.room = step.targetRoom;
+          neighbor_.pos = step.outPos;
+          neighbor_.hidden = false;
+          neighbor_.currentAnim = step.outAnim;
+          neighbor_.nextAnim = step.outAnim;
+          neighbor_.animFrame = 0;
+          neighborQueue_.pop_front();
+          continue;
+        }
         if (step.elapsedTicks == 0) {
           neighbor_.hidden = true;
           if (step.objectIndex >= 0 && step.objectIndex < (int)level_.objects.size()) {
@@ -1455,40 +1683,10 @@ void GameEngine::updateNeighbor() {
           neighbor_.room = step.targetRoom;
           neighbor_.pos = step.outPos;
         }
-        if (step.elapsedTicks >= step.totalTicks) {
-          neighbor_.room = step.targetRoom;
-          neighbor_.pos = step.outPos;
-          neighbor_.hidden = false;
-          neighbor_.currentAnim = step.outAnim;
-          neighbor_.nextAnim = step.outAnim;
-          neighbor_.animFrame = 0;
-          neighborQueue_.pop_front();
-        }
-        break;
+        return;
       }
 
       case TaskStep::Type::PlayAction: {
-        if (step.elapsedTicks == 0) {
-          if (step.triggerPrankScore && step.objectIndex >= 0 && step.objectIndex < (int)level_.objects.size()) {
-            awardPrankScore(level_.objects[step.objectIndex].name, step.trick);
-          }
-          if (step.actorAnim == "inv") {
-            neighbor_.hidden = true;
-            neighbor_.currentAnim = "inv";
-          } else if (!step.actorAnim.empty()) {
-            neighbor_.hidden = false;
-            neighbor_.currentAnim = step.actorAnim;
-            neighbor_.nextAnim = step.actorNextAnim;
-            neighbor_.animFrame = 0;
-          }
-          if (step.objectIndex >= 0 && step.objectIndex < (int)level_.objects.size() && !step.objAnim.empty()) {
-            PlacedObject& po = level_.objects[step.objectIndex];
-            po.currentAnim = step.objAnim;
-            po.nextAnim = step.objNextAnim;
-            po.animFrame = 0;
-          }
-        }
-        step.elapsedTicks++;
         if (step.elapsedTicks >= step.durationTicks) {
           if (step.objectIndex >= 0 && step.objectIndex < (int)level_.objects.size()) {
             PlacedObject& po = level_.objects[step.objectIndex];
@@ -1510,25 +1708,46 @@ void GameEngine::updateNeighbor() {
           neighbor_.nextAnim = neighbor_.currentAnim;
           neighbor_.animFrame = 0;
           neighborQueue_.pop_front();
+          continue;
         }
-        break;
+        if (step.elapsedTicks == 0) {
+          if (step.triggerPrankScore && step.objectIndex >= 0 && step.objectIndex < (int)level_.objects.size()) {
+            awardPrankScore(level_.objects[step.objectIndex].name, step.trick);
+          }
+          if (step.actorAnim == "inv") {
+            neighbor_.hidden = true;
+            neighbor_.currentAnim = "inv";
+          } else if (!step.actorAnim.empty()) {
+            neighbor_.hidden = false;
+            neighbor_.currentAnim = step.actorAnim;
+            neighbor_.nextAnim = step.actorNextAnim;
+            neighbor_.animFrame = 0;
+          }
+          if (step.objectIndex >= 0 && step.objectIndex < (int)level_.objects.size() && !step.objAnim.empty()) {
+            PlacedObject& po = level_.objects[step.objectIndex];
+            po.currentAnim = step.objAnim;
+            po.nextAnim = step.objNextAnim;
+            po.animFrame = 0;
+          }
+        }
+        step.elapsedTicks++;
+        return;
       }
 
       case TaskStep::Type::InteractObject: {
         int idx = step.objectIndex;
         neighborQueue_.pop_front();
         enqueueNeighborObjectActions(idx);
-        break;
+        continue;
       }
 
       default:
         neighborQueue_.pop_front();
-        break;
+        continue;
     }
-    return;
   }
 
-  // Plan next routine stop (skip stops that are only visited when tricked unless currently tricked!)
+  // Plan next routine stop
   if (routine_.empty()) return;
   int targetObjIdx = -1;
   const RoutineStop* chosenStop = nullptr;
@@ -1550,6 +1769,9 @@ void GameEngine::updateNeighbor() {
     if (nidx < 0 && !st.trickObj.empty()) {
       nidx = findObjectIndex(st.trickObj, st.room);
     }
+    if (nidx < 0 && !st.fallbackObj.empty()) {
+      nidx = findObjectIndex(st.fallbackObj, st.room);
+    }
     if (nidx >= 0) {
       targetObjIdx = nidx;
       chosenStop = &st;
@@ -1559,24 +1781,20 @@ void GameEngine::updateNeighbor() {
   if (targetObjIdx < 0 || !chosenStop) return;
   if (!chosenStop->iconName.empty()) currentBubbleIcon_ = chosenStop->iconName;
 
-  // Enqueue room path for Neighbor with synchronized door animations
+  // Enqueue room path for Neighbor with 2.5D walk lines and synchronized door animations
   std::string curRoom = neighbor_.room;
+  Point curPos = neighbor_.pos;
   for (const RoomEdge& e : findRoomPath(curRoom, chosenStop->room)) {
     const ObjectDef* dIn = level_.findObjectDef(e.doorIn);
     const ObjectDef* dOut = level_.findObjectDef(e.doorOut);
     int inIdx = findObjectIndex(e.doorIn, curRoom);
     int outIdx = findObjectIndex(e.doorOut, e.targetRoom);
-    Point inPos = dIn ? dIn->hotspotOr("neighbor", Point{450, 400}) : Point{450, 400};
+    Point inPos = dIn ? dIn->hotspotOr("neighbor", Point{450, 420}) : Point{450, 420};
     if (inIdx >= 0) {
       inPos.x += level_.objects[inIdx].position.x;
       inPos.y += level_.objects[inIdx].position.y;
     }
-    if (const RoomDef* rIn = level_.findRoom(curRoom)) {
-      int lo = std::min(rIn->path1.x, rIn->path2.x);
-      int hi = std::max(rIn->path1.x, rIn->path2.x);
-      if (hi > lo) inPos.x = std::clamp(inPos.x, lo, hi);
-    }
-    Point outPos = dOut ? dOut->hotspotOr("neighbor_out", dOut->hotspotOr("neighbor", Point{450, 400})) : Point{450, 400};
+    Point outPos = dOut ? dOut->hotspotOr("neighbor_out", dOut->hotspotOr("neighbor", Point{450, 420})) : Point{450, 420};
     if (outIdx >= 0) {
       outPos.x += level_.objects[outIdx].position.x;
       outPos.y += level_.objects[outIdx].position.y;
@@ -1587,10 +1805,7 @@ void GameEngine::updateNeighbor() {
       if (hi > lo) outPos.x = std::clamp(outPos.x, lo, hi);
     }
 
-    TaskStep walk{};
-    walk.type = TaskStep::Type::WalkToX;
-    walk.targetX = inPos.x;
-    neighborQueue_.push_back(walk);
+    enqueueRoomWalk(neighborQueue_, curRoom, curPos, inPos, false);
 
     TaskStep doorStep{};
     doorStep.type = TaskStep::Type::TraverseDoor;
@@ -1601,15 +1816,16 @@ void GameEngine::updateNeighbor() {
     doorStep.outPos = outPos;
     doorStep.outAnim = "ms2";
     int enterFrames = dIn ? animFrameCount(dIn->gfx, "neighbor_enter", 12) : 12;
-    int leaveFrames = dOut ? animFrameCount(dOut->gfx, "neighbor_leave", 22) : 22;
+    int leaveFrames = dOut ? animFrameCount(dOut->gfx, "neighbor_leave", 23) : 23;
     if (dIn) {
       if (const ActionDef* aEn = dIn->findAction("enter", "neighbor")) {
-        if (aEn->timeTicks > 0) enterFrames = aEn->timeTicks;
+        if (aEn->timeTicks > 0) enterFrames = std::max(enterFrames, aEn->timeTicks);
       }
     }
     if (dOut) {
       if (const ActionDef* aLv = dOut->findAction("leave", "neighbor")) {
         if (!aLv->actorNextAnim.empty()) doorStep.outAnim = aLv->actorNextAnim;
+        if (aLv->timeTicks > 0) leaveFrames = std::max(leaveFrames, aLv->timeTicks);
       }
     }
     doorStep.enterTicks = std::max(1, enterFrames);
@@ -1617,17 +1833,16 @@ void GameEngine::updateNeighbor() {
     neighborQueue_.push_back(doorStep);
 
     curRoom = e.targetRoom;
+    curPos = outPos;
   }
 
   const PlacedObject& targetPo = level_.objects[targetObjIdx];
   const ObjectDef* targetOd = level_.findObjectDef(targetPo.name);
-  Point hs = targetOd ? targetOd->hotspotOr("neighbor", Point{450, 400}) : Point{450, 400};
+  Point hs = targetOd ? targetOd->hotspotOr("neighbor", Point{450, 420}) : Point{450, 420};
   hs.x += targetPo.position.x;
+  hs.y += targetPo.position.y;
 
-  TaskStep walk{};
-  walk.type = TaskStep::Type::WalkToX;
-  walk.targetX = hs.x;
-  neighborQueue_.push_back(walk);
+  enqueueRoomWalk(neighborQueue_, curRoom, curPos, hs, false);
 
   TaskStep inter{};
   inter.type = TaskStep::Type::InteractObject;
