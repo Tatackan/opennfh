@@ -342,7 +342,7 @@ void GameEngine::loadUserProgress() {
       size_t comma = v.find(',');
       if (comma != std::string::npos) {
         LevelProgress lp;
-        lp.bestQuota = std::atoi(v.substr(0, comma).c_str());
+        lp.bestQuota = std::clamp(std::atoi(v.substr(0, comma).c_str()), 0, 100);
         lp.bestTricks = std::atoi(v.substr(comma + 1).c_str());
         lp.completed = lp.bestQuota > 0;
         progress_[lv] = lp;
@@ -364,7 +364,7 @@ void GameEngine::saveUserProgress() const {
   oss << "autoScroll=" << (optAutoScroll_ ? 1 : 0) << "\n";
   oss << "coloredCursor=" << (optColoredCursor_ ? 1 : 0) << "\n";
   for (const auto& kv : progress_) {
-    oss << "level." << kv.first << "=" << kv.second.bestQuota << "," << kv.second.bestTricks << "\n";
+    oss << "level." << kv.first << "=" << std::clamp(kv.second.bestQuota, 0, 100) << "," << kv.second.bestTricks << "\n";
   }
   std::string out = oss.str();
   writeWholeFile(savePath, reinterpret_cast<const uint8_t*>(out.data()), out.size());
@@ -405,6 +405,7 @@ void GameEngine::enterScreen(ScreenState st) {
 }
 
 void GameEngine::finishEpisode(bool timeExpired, bool caughtOut) {
+  quota_ = std::clamp(quota_, 0, 100);
   summaryTimeExpired_ = timeExpired;
   summarySuccess_ = !timeExpired && !caughtOut && (quota_ >= level_.info.minQuota);
   summaryPerfect_ = summarySuccess_ && (tricksDone_ >= level_.info.reachable);
@@ -1653,8 +1654,8 @@ void GameEngine::updateWoody() {
 void GameEngine::awardPrankScore(const std::string& objName, const TrickDef& trick) {
   int bonus = (angerTicks_ > 0) ? 5 : 0;
   lastQuotaGain_ = trick.quota + bonus;
-  quota_ += lastQuotaGain_;
-  tricksDone_++;
+  quota_ = std::clamp(quota_ + lastQuotaGain_, 0, 100);
+  tricksDone_ = std::min(level_.info.reachable, tricksDone_ + 1);
   angerMaxTicks_ = std::max(1, trick.angryTime > 0 ? trick.angryTime : level_.defaultAngryTime);
   angerTicks_ = angerMaxTicks_;
 
