@@ -139,9 +139,13 @@ ActionDef parseActionNode(const XmlNode* actNode) {
   return a;
 }
 
-void parseObjectsXml(const XmlDocument& doc, LevelData& out) {
-  for (const auto& childPtr : doc.root.children) {
+void parseObjectsNode(const XmlNode& parent, LevelData& out) {
+  for (const auto& childPtr : parent.children) {
     const XmlNode* n = childPtr.get();
+    if (n->name == "objects" || n->name == "all_objects") {
+      parseObjectsNode(*n, out);
+      continue;
+    }
     if (n->name == "icon") {
       std::string name = toLowerAscii(n->attrOr("name"));
       std::string gfx = n->attrOr("gfx");
@@ -167,7 +171,8 @@ void parseObjectsXml(const XmlDocument& doc, LevelData& out) {
     } else if (n->name == "actor") {
       std::string name = n->attrOr("name");
       if (name.empty()) continue;
-      ActorDef& ad = out.actors[toLowerAscii(name)];
+      const std::string lower = toLowerAscii(name);
+      ActorDef& ad = out.actors[lower];
       ad.name = name;
       if (const std::string* g = n->attr("gfx")) ad.gfx = *g;
       int hx = 0, hy = 0;
@@ -177,6 +182,25 @@ void parseObjectsXml(const XmlDocument& doc, LevelData& out) {
       }
       for (const XmlNode* act : n->childrenNamed("action")) {
         ad.actions.push_back(parseActionNode(act));
+      }
+      if (lower != "woody" && lower != "neighbor") {
+        ObjectDef& od = out.objectDefs[lower];
+        od.name = name;
+        if (!ad.gfx.empty()) od.gfx = ad.gfx;
+        else if (od.gfx.empty()) od.gfx = name;
+        if (const XmlNode* sa = n->child("stdaction")) od.stdAction = sa->attrOr("name");
+        if (ad.hotspot.x != 0 || ad.hotspot.y != 0) {
+          od.hotspots["woody"] = ad.hotspot;
+          od.hotspots["neighbor"] = ad.hotspot;
+        }
+        for (const XmlNode* hs : n->childrenNamed("hotspot")) {
+          int ox = 0, oy = 0;
+          hs->attrPair("offset", ox, oy);
+          od.hotspots[toLowerAscii(hs->attrOr("name"))] = Point{ad.hotspot.x + ox, ad.hotspot.y + oy};
+        }
+        for (const XmlNode* act : n->childrenNamed("action")) {
+          od.actions.push_back(parseActionNode(act));
+        }
       }
     } else if (n->name == "object" || n->name == "door") {
       ObjectDef od;
@@ -213,6 +237,10 @@ void parseObjectsXml(const XmlDocument& doc, LevelData& out) {
   }
 }
 
+void parseObjectsXml(const XmlDocument& doc, LevelData& out) {
+  parseObjectsNode(doc.root, out);
+}
+
 void parseStringsXml(const XmlDocument& doc, LevelData& out) {
   for (const XmlNode* sNode : doc.root.childrenNamed("strings")) {
     for (const XmlNode* s : sNode->childrenNamed("string")) {
@@ -220,18 +248,24 @@ void parseStringsXml(const XmlDocument& doc, LevelData& out) {
       out.strings[key] = s->attrOr("text");
     }
   }
+  for (const XmlNode* s : doc.root.childrenNamed("string")) {
+    std::string key = toLowerAscii(s->attrOr("name")) + "|" + toLowerAscii(s->attrOr("category"));
+    out.strings[key] = s->attrOr("text");
+  }
 }
 
 void parseTricksXml(const XmlDocument& doc, LevelData& out) {
+  auto addTrick = [&](const XmlNode* t) {
+    TrickDef td;
+    td.name = t->attrOr("name");
+    td.quota = t->attrInt("quota1", 10);
+    td.angryTime = t->attrInt("angrytime", out.defaultAngryTime);
+    if (!td.name.empty()) out.tricks[toLowerAscii(td.name)] = td;
+  };
   for (const XmlNode* tNode : doc.root.childrenNamed("tricks")) {
-    for (const XmlNode* t : tNode->childrenNamed("trick")) {
-      TrickDef td;
-      td.name = t->attrOr("name");
-      td.quota = t->attrInt("quota1", 10);
-      td.angryTime = t->attrInt("angrytime", out.defaultAngryTime);
-      if (!td.name.empty()) out.tricks[toLowerAscii(td.name)] = td;
-    }
+    for (const XmlNode* t : tNode->childrenNamed("trick")) addTrick(t);
   }
+  for (const XmlNode* t : doc.root.childrenNamed("trick")) addTrick(t);
 }
 
 void parseCombineXml(const XmlDocument& doc, LevelData& out) {
@@ -248,11 +282,21 @@ void parseCombineXml(const XmlDocument& doc, LevelData& out) {
     if (ings.size() >= 2) {
       cd.item = ings[1]->attrOr("name");
       cd.removeItem = toLowerAscii(ings[1]->attrOr("remove", "true")) == "true";
+      // Some levels (e.g. level_piano, level_bath) list the inventory item first and the world object second.
+      bool firstIsInv = out.inventar.count(toLowerAscii(cd.target)) > 0;
+      bool secondIsInv = out.inventar.count(toLowerAscii(cd.item)) > 0;
+      if (firstIsInv && !secondIsInv) {
+        std::swap(cd.target, cd.item);
+        std::swap(cd.removeTarget, cd.removeItem);
+      }
     }
     if (!cd.resultObject.empty() && !cd.target.empty()) out.combinations.push_back(std::move(cd));
   };
   for (const XmlNode* c : doc.root.childrenNamed("combination")) handleCombo(c);
   for (const XmlNode* root : doc.root.childrenNamed("combinations")) {
+    for (const XmlNode* c : root->childrenNamed("combination")) handleCombo(c);
+  }
+  for (const XmlNode* root : doc.root.childrenNamed("combine")) {
     for (const XmlNode* c : root->childrenNamed("combination")) handleCombo(c);
   }
 }
@@ -316,6 +360,8 @@ void parseLevelXml(const XmlDocument& doc, LevelData& out) {
       po.visible = toLowerAscii(n->attrOr("visible", "true")) != "false";
       po.isDoor = isDoor;
       if (const ObjectDef* od = out.findObjectDef(po.name)) {
+        // Locked doors (e.g. anc/bas and bed/wor in Season 1-2) are defined as <object> in objects.xml
+        po.isDoor = od->isDoor;
         for (const auto& [itemName, cnt] : od->contents) {
           for (int i = 0; i < cnt; ++i) po.items.push_back(itemName);
         }
@@ -332,7 +378,23 @@ void parseLevelXml(const XmlDocument& doc, LevelData& out) {
       sp.room = r.name;
       sp.layer = a->attrInt("layer", 4);
       a->attrPair("position", sp.position.x, sp.position.y);
-      out.spawns.push_back(std::move(sp));
+      out.spawns.push_back(sp);
+
+      const std::string lower = toLowerAscii(sp.name);
+      if (lower != "woody" && lower != "neighbor" && lower != "hal") {
+        PlacedObject po;
+        po.name = sp.name;
+        po.roomName = r.name;
+        po.layer = sp.layer;
+        Point hs{0, 0};
+        auto ait = out.actors.find(lower);
+        if (ait != out.actors.end()) hs = ait->second.hotspot;
+        po.position = Point{sp.position.x - hs.x, sp.position.y - hs.y};
+        std::string initAnim = a->attrOr("animation", "ms");
+        po.currentAnim = initAnim;
+        po.nextAnim = initAnim;
+        out.objects.push_back(std::move(po));
+      }
     }
 
     out.rooms.push_back(std::move(r));

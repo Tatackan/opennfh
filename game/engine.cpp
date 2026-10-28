@@ -588,11 +588,33 @@ void GameEngine::buildNeighborRoutine() {
       const std::string& sr = candidates[i].shortRaw;
       const std::string& sn = candidates[i].shortNorm;
       if (sr == icon || sn == iconNorm ||
-          (icon == "milk_bottle" && (sr == "fridge" || sr == "milkbottle")) ||
+          (icon == "milk_bottle" && (sr == "fridge" || sr == "milkbottle" || sr == "babybottle")) ||
           (icon == "mail" && sr == "mailbox") ||
           (icon == "parrot" && sr == "chili") ||
+          (icon == "piano" && sr == "score") ||
+          (icon == "football" && sr == "bowlingbag") ||
+          (icon == "photo_album" && sr == "book") ||
+          (icon == "bath" && (sr == "tub_empty" || sr == "tub")) ||
+          (icon == "magnesium" && sr == "magnesiumbottle") ||
+          (icon == "painting" && (sr == "picture_empty" || sr == "picture")) ||
+          (icon == "toothbrush" && sr == "toothbrushset") ||
+          (icon == "coffee" && sr == "coffeebox") ||
+          (icon == "teeth" && (sr == "teeth_empty" || sr == "teeth")) ||
+          (icon == "cookies" && sr == "cookiebox") ||
+          (icon == "sleep" && sr == "bed") ||
+          (icon == "bbq" && sr == "barbecue") ||
+          (icon == "laundry_rack" && (sr == "noclothes" || sr == "clothes")) ||
           (icon == "ironing" && sn.find("ironing") != std::string::npos) ||
-          (icon == "smoke" && sn.find("pipe") != std::string::npos)) {
+          (icon == "yoga_mat" && sr == "mat") ||
+          (icon == "powertool" && sr == "anglegrinder") ||
+          (icon == "valve" && (sr == "valve_on" || sr == "valve_off")) ||
+          (icon == "heat_valve" && (sr == "heatvalve_off" || sr == "heatvalve_on")) ||
+          (icon == "basin" && (sr == "basin_flooded" || sr == "basin")) ||
+          (icon == "chairkit" && sr == "stoolkit") ||
+          (icon == "phonograph" && (sr == "lockedphono" || sr == "phono")) ||
+          (icon == "medals" && sr == "medalbox") ||
+          (icon == "horn" && sr == "woodhorn") ||
+          (icon == "smoke" && (sn.find("pipe") != std::string::npos || sn.find("tabac") != std::string::npos))) {
         matched = (int)i;
         break;
       }
@@ -782,13 +804,13 @@ void GameEngine::updateHover(int worldX, int worldY, int screenX, int screenY) {
       if (withTitle.empty()) withTitle = objTitle;
       hoverText_ = level_.getUIString("use") + " " + itemTitle + " " + level_.getUIString("with") + " " + withTitle;
       const CombinationDef* combo = findCombination(po.name, heldItem);
-      cursorVpath_ = (combo && combo->isTrick) ? "gfx/cursor/use_with.tga" : "gfx/cursor/not_possible.tga";
+      cursorVpath_ = (combo && !combo->isWrong) ? "gfx/cursor/use_with.tga" : "gfx/cursor/not_possible.tga";
       return;
     }
 
-    // Check bare-hand combination (like twisting the TV antenna in level_peep)
+    // Check bare-hand combination (like twisting the TV antenna in level_peep or valves in level_DIY)
     if (const CombinationDef* bareCombo = findCombination(po.name, "")) {
-      if (bareCombo->isTrick) {
+      if (!bareCombo->isWrong) {
         hoverText_ = level_.getUIString("use") + " " + objTitle;
         cursorVpath_ = "gfx/cursor/use.tga";
         return;
@@ -825,7 +847,7 @@ void GameEngine::updateHover(int worldX, int worldY, int screenX, int screenY) {
       std::string itemTitle = level_.getString(heldItem, "name");
       std::string roomTitle = level_.getString(hoveredRoom_, "name");
       hoverText_ = level_.getUIString("use") + " " + itemTitle + " (" + (roomTitle.empty() ? hoveredRoom_ : roomTitle) + ")";
-      cursorVpath_ = (roomCombo && roomCombo->isTrick) ? "gfx/cursor/use_with.tga" : "gfx/cursor/not_possible.tga";
+      cursorVpath_ = (roomCombo && !roomCombo->isWrong) ? "gfx/cursor/use_with.tga" : "gfx/cursor/not_possible.tga";
     } else {
       std::string floorTitle = level_.getString("floor", "name");
       hoverText_ = (floorTitle.empty() ? "Идти" : floorTitle);
@@ -1073,7 +1095,7 @@ void GameEngine::onLeftClick(int worldX, int worldY, int screenX, int screenY, b
       if (!combo) {
         for (const std::string& invItem : inventory_) {
           if (const CombinationDef* c = findCombination(po.name, invItem)) {
-            if (c->isTrick) {
+            if (!c->isWrong) {
               combo = c;
               break;
             }
@@ -1090,7 +1112,7 @@ void GameEngine::onLeftClick(int worldX, int worldY, int screenX, int screenY, b
     Point curPos = currentWoodyEndPos();
     enqueueRoomWalk(woodyQueue_, po.roomName, curPos, targetPos, doubleClick);
 
-    if (combo && combo->isTrick) {
+    if (combo && !combo->isWrong) {
       TaskStep apply{};
       apply.type = TaskStep::Type::ApplyCombination;
       apply.objectIndex = hoveredObject_;
@@ -1115,7 +1137,7 @@ void GameEngine::onLeftClick(int worldX, int worldY, int screenX, int screenY, b
 
     if (!heldItem.empty()) {
       const CombinationDef* combo = findCombination(hoveredRoom_, heldItem);
-      if (combo && combo->isTrick) {
+      if (combo && !combo->isWrong) {
         queuePathToRoom(hoveredRoom_, doubleClick);
         Point curPos = currentWoodyEndPos();
         enqueueRoomWalk(woodyQueue_, hoveredRoom_, curPos, Point{localX, pathY}, doubleClick);
@@ -1329,6 +1351,8 @@ void GameEngine::updateWoody() {
           if (step.showProgressBar) {
             woodyActionTicks_ = woodyActionTotalTicks_ = 0;
           }
+          const bool resultIsInv = step.applyComboOnFinish &&
+                                   level_.inventar.count(toLowerAscii(step.combo.resultObject)) > 0;
           if (step.objectIndex >= 0 && step.objectIndex < (int)level_.objects.size()) {
             PlacedObject& po = level_.objects[step.objectIndex];
             if (!step.objNextAnim.empty()) {
@@ -1351,13 +1375,19 @@ void GameEngine::updateWoody() {
               statusBanner_ = "Получено: " + gained;
               bannerTicks_ = kTicksPerSecond * 3;
             }
-            if (step.applyComboOnFinish && step.combo.removeTarget) {
+            if (step.applyComboOnFinish && !resultIsInv && step.combo.removeTarget) {
               po.name = step.combo.resultObject;
               po.currentAnim = "ms";
               po.nextAnim = "ms";
               po.animFrame = 0;
+              po.items.clear();
+              if (const ObjectDef* newOd = level_.findObjectDef(po.name)) {
+                for (const auto& [itemName, cnt] : newOd->contents) {
+                  for (int i = 0; i < cnt; ++i) po.items.push_back(itemName);
+                }
+              }
             }
-          } else if (step.applyComboOnFinish && !step.targetRoom.empty()) {
+          } else if (step.applyComboOnFinish && !resultIsInv && !step.targetRoom.empty()) {
             PlacedObject trap;
             trap.name = step.combo.resultObject;
             trap.roomName = step.targetRoom;
@@ -1372,8 +1402,14 @@ void GameEngine::updateWoody() {
               auto it = std::find(inventory_.begin(), inventory_.end(), step.combo.item);
               if (it != inventory_.end()) inventory_.erase(it);
             }
+            if (resultIsInv) {
+              if (std::find(inventory_.begin(), inventory_.end(), step.combo.resultObject) == inventory_.end()) {
+                inventory_.push_back(step.combo.resultObject);
+              }
+            }
             std::string trickTitle = level_.getString(step.combo.resultObject, "name");
-            statusBanner_ = "Пакость готова: " + (trickTitle.empty() ? step.combo.resultObject : trickTitle) + "!";
+            statusBanner_ = (step.combo.isTrick ? "Пакость готова: " : "Готово: ") +
+                            (trickTitle.empty() ? step.combo.resultObject : trickTitle) + "!";
             bannerTicks_ = kTicksPerSecond * 3;
           }
 
