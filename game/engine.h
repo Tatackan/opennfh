@@ -186,6 +186,7 @@ class GameEngine {
   void onMenuClick(Point mp, bool doubleClick);
   void queuePathToRoom(const std::string& destRoom, bool sneak);
   const CombinationDef* findCombination(const std::string& targetName, const std::string& itemName) const;
+  void toggleFullscreen();
 
   // --- rendering ---
   void render();
@@ -217,6 +218,7 @@ class GameEngine {
   bool paused_ = false;
   bool showDebug_ = false;
   bool fullHouseView_ = true;
+  bool fullscreen_ = false;
   int winW_ = 1280, winH_ = 800;
 
   ScreenState screen_ = ScreenState::MainMenu;
@@ -296,6 +298,8 @@ class GameEngine {
   bool catchSequenceActive_ = false;
   int catchTicks_ = 0;
   int catchesCount_ = 0;
+  bool neighborChasing_ = false;
+  int neighborAlertTicks_ = 0;
 
   // Inventory & score
   std::vector<std::string> inventory_;

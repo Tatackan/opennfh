@@ -29,7 +29,7 @@ int main(int argc, char** argv) {
     else if (a == "--stride" && hasNext) opts.recordStride = std::max(1, std::atoi(args[++i].c_str()));
     else if (a == "-h" || a == "--help") {
       std::printf(
-          "OpenNFH — Neighbours from Hell 1 engine\n"
+          "OpenNFH - Neighbours from Hell 1 engine\n"
           "usage: opennfh [--game PATH] [--level LEVEL_NAME] [--screen SCREEN] [--screenshot FILE.png]\n"
           "  controls:\n"
           "    Left click    walk / open container / hide / use item / go through door\n"
@@ -37,6 +37,7 @@ int main(int argc, char** argv) {
           "    Esc           open in-game pause menu / back in menus\n"
           "    [ / ]         previous / next level (all 17 levels)\n"
           "    V or Tab      toggle Full House camera / Follow Woody camera\n"
+          "    F11 or T      toggle fullscreen mode\n"
           "    R             restart current level\n"
           "    H             toggle debug hitboxes\n"
           "    Space         pause\n");

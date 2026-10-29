@@ -72,7 +72,7 @@ bool GameEngine::init(const GameOptions& opts) {
   if (audioOk_) Mix_AllocateChannels(16);
 
   SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
-  window_ = SDL_CreateWindow("OpenNFH — Как достать соседа: Сладкая месть", SDL_WINDOWPOS_CENTERED,
+  window_ = SDL_CreateWindow("OpenNFH - Как достать соседа: Сладкая месть", SDL_WINDOWPOS_CENTERED,
                              SDL_WINDOWPOS_CENTERED, winW_, winH_, SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
   if (!window_) return false;
   ren_ = SDL_CreateRenderer(window_, -1, SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
@@ -144,6 +144,10 @@ bool GameEngine::init(const GameOptions& opts) {
     completedSeason_ = 1;
     seasonTrophyTier_ = 3;
     enterScreen(ScreenState::SeasonVictory);
+  } else if (scr == "confirm") {
+    enterScreen(ScreenState::InGame);
+    confirmAction_ = ConfirmAction::RestartEpisode;
+    confirmText_ = "Вы действительно хотите начать съемки заново?";
   } else if (opts.startInLevel || !opts.screenshot.empty()) {
     enterScreen(ScreenState::InGame);
   } else {
@@ -210,7 +214,10 @@ void GameEngine::startMusic(const std::string& musicVpath) {
     music_ = nullptr;
   }
   if (gd_->read(musicVpath, musicMem_)) {
-    music_ = Mix_LoadMUS_RW(SDL_RWFromConstMem(musicMem_.data(), (int)musicMem_.size()), 1);
+    music_ = Mix_LoadMUSType_RW(SDL_RWFromConstMem(musicMem_.data(), (int)musicMem_.size()), MUS_MP3, 1);
+    if (!music_) {
+      music_ = Mix_LoadMUS_RW(SDL_RWFromConstMem(musicMem_.data(), (int)musicMem_.size()), 1);
+    }
     if (music_) {
       applyAudioVolumes();
       Mix_PlayMusic(music_, -1);
@@ -298,7 +305,7 @@ void GameEngine::loadMenuData() {
   }
 
   creditsLines_.clear();
-  creditsLines_.push_back({"OpenNFH — Кроссплатформенный движок (C++17 / SDL2)", true});
+  creditsLines_.push_back({"OpenNFH - Кроссплатформенный движок (C++17 / SDL2)", true});
   creditsLines_.push_back({"Как достать соседа: Сладкая месть", false});
   creditsLines_.push_back({"", false});
   std::vector<uint8_t> craw;
@@ -451,6 +458,8 @@ bool GameEngine::selectLevel(int index) {
   catchSequenceActive_ = false;
   catchTicks_ = 0;
   catchesCount_ = 0;
+  neighborChasing_ = false;
+  neighborAlertTicks_ = 0;
 
   // Initialize actors from spawns
   woody_ = ActorState{"woody", "fro", Point{110, 218}, 4, 2, false, -1, "ms2", "ms2", 0};
@@ -491,9 +500,9 @@ bool GameEngine::selectLevel(int index) {
   buildNeighborRoutine();
 
   std::string epTitle = (currentLevelIdx_ < (int)briefings_.size()) ? briefings_[currentLevelIdx_].title : level_.info.name;
-  std::string title = "OpenNFH — " + epTitle + " [" + level_.info.name + "]";
+  std::string title = "OpenNFH - " + epTitle + " [" + level_.info.name + "]";
   SDL_SetWindowTitle(window_, title.c_str());
-  statusBanner_ = "Серия: «" + epTitle + "»  (Esc — меню, V — камера, R — рестарт)";
+  statusBanner_ = "Серия: «" + epTitle + "»  (Esc - меню, V - камера, F11 - полный экран, R - рестарт)";
   bannerTicks_ = kTicksPerSecond * 4;
   return true;
 }
@@ -1576,6 +1585,16 @@ void GameEngine::updateWoody() {
             stTake.giveContainerItems = true;
             seq.push_back(stTake);
           } else {
+            TaskStep stDecline{};
+            stDecline.type = TaskStep::Type::PlayAction;
+            stDecline.objectIndex = idx;
+            stDecline.actorAnim = "nono";
+            stDecline.actorNextAnim = finalNextAnim;
+            stDecline.objAnim = openObjAnim;
+            stDecline.objNextAnim = openObjAnim.empty() ? "ms" : openObjAnim;
+            stDecline.durationTicks = animFrameCount("woody", "nono", 18);
+            seq.push_back(stDecline);
+            playSfx("sfx/wod_nono.wav");
             statusBanner_ = "Пусто!";
             bannerTicks_ = kTicksPerSecond * 2;
           }
@@ -2605,6 +2624,8 @@ void GameEngine::checkStealthDetection() {
     advanceActorAnim(neighbor_);
     if (catchTicks_ <= 0) {
       catchSequenceActive_ = false;
+      neighborChasing_ = false;
+      neighborAlertTicks_ = 0;
       catchesCount_++;
       if (catchesCount_ >= 3) {
         finishEpisode(false, true);
@@ -2624,6 +2645,11 @@ void GameEngine::checkStealthDetection() {
           po.nextAnim = "ms";
           po.animFrame = 0;
         }
+        if (po.currentAnim.rfind("woody_", 0) == 0 || po.currentAnim == "decline") {
+          po.currentAnim = "ms";
+          po.nextAnim = "ms";
+          po.animFrame = 0;
+        }
       }
       neighbor_.currentAnim = "ms2";
       neighbor_.nextAnim = "ms2";
@@ -2634,55 +2660,82 @@ void GameEngine::checkStealthDetection() {
   }
 
   bool woodyTrulyHidden = (woody_.hidden && woody_.hidingInObject >= 0);
-  if (woodyTrulyHidden || neighbor_.hidden) return;
-  if (toLowerAscii(woody_.room) != toLowerAscii(neighbor_.room)) return;
+  if (woodyTrulyHidden || neighbor_.hidden || toLowerAscii(woody_.room) != toLowerAscii(neighbor_.room)) {
+    if (neighborChasing_) {
+      neighborChasing_ = false;
+      neighborAlertTicks_ = 0;
+      neighbor_.currentAnim = "ms2";
+      neighbor_.nextAnim = "ms2";
+      neighbor_.animFrame = 0;
+      neighborWaitTicks_ = 12;
+    }
+    return;
+  }
 
-  // Caught in the same room!
-  for (PlacedObject& po : level_.objects) {
-    if (po.isDoor && (po.currentAnim == "woody_enter" || po.currentAnim == "woody_leave")) {
-      po.currentAnim = "ms";
-      po.nextAnim = "ms";
-      po.animFrame = 0;
+  // Woody and Neighbor are in the same room!
+  int dist = std::abs(woody_.pos.x - neighbor_.pos.x);
+  if (dist <= 45) {
+    neighborChasing_ = false;
+    neighborAlertTicks_ = 0;
+    catchSequenceActive_ = true;
+    catchTicks_ = animFrameCount("neighbor", "kill1", 28);
+    woodyQueue_.clear();
+    neighborQueue_.clear();
+    woodyActionTicks_ = woodyActionTotalTicks_ = 0;
+    woody_.hidden = true;  // fight cloud is drawn on neighbor's kill1 animation
+    neighbor_.pos = woody_.pos;
+    neighbor_.currentAnim = "kill1";
+    neighbor_.nextAnim = "ms2";
+    neighbor_.animFrame = 0;
+    playSfx("sfx/wod_fear1.wav");
+    playSfx("sfx/na_beats1.wav");
+    playSfx("sfx/wod_au1.wav");
+    statusBanner_ = "СОСЕД ПОЙМАЛ ВУДИ! (" + std::to_string(catchesCount_ + 1) + "/3)";
+    bannerTicks_ = kTicksPerSecond * 3;
+
+    for (PlacedObject& po : level_.objects) {
+      if (po.isDoor && (po.currentAnim == "woody_enter" || po.currentAnim == "woody_leave")) {
+        po.currentAnim = "ms";
+        po.nextAnim = "ms";
+        po.animFrame = 0;
+      }
+      if (po.currentAnim.rfind("woody_", 0) == 0 || po.currentAnim == "decline") {
+        po.currentAnim = "ms";
+        po.nextAnim = "ms";
+        po.animFrame = 0;
+      }
+    }
+  } else {
+    // Neighbor discovers Woody and starts chase
+    if (!neighborChasing_) {
+      neighborChasing_ = true;
+      neighborAlertTicks_ = 6;
+      neighborQueue_.clear();
+      neighborBusyInAnim_ = false;
+      neighbor_.facing = (woody_.pos.x > neighbor_.pos.x) ? 1 : 3;
+      playSfx("sfx/na_killshout1.wav");
+      playSfx("sfx/wod_fear1.wav");
+      statusBanner_ = "СОСЕД ЗАМЕТИЛ ВАС!";
+      bannerTicks_ = kTicksPerSecond * 2;
+      if (!woodyQueue_.empty() && woodyQueue_.front().type != TaskStep::Type::TraverseDoor) {
+        woodyQueue_.clear();
+        woodyActionTicks_ = woodyActionTotalTicks_ = 0;
+      }
+    }
+
+    if (neighborAlertTicks_ > 0) {
+      neighborAlertTicks_--;
+      neighbor_.currentAnim = (neighbor_.facing == 1) ? "find1" : "find3";
+      advanceActorAnim(neighbor_);
+    } else {
+      int dir = (woody_.pos.x > neighbor_.pos.x) ? 1 : -1;
+      neighbor_.facing = (dir > 0) ? 1 : 3;
+      neighbor_.currentAnim = (dir > 0) ? "mr1" : "mr3";
+      neighbor_.pos.x += dir * 14;
+      neighbor_.pos.y = woody_.pos.y;
+      advanceActorAnim(neighbor_);
     }
   }
-  if (!woodyQueue_.empty()) {
-    const TaskStep& front = woodyQueue_.front();
-    if (front.type == TaskStep::Type::PlayAction && front.objectIndex >= 0 &&
-        front.objectIndex < (int)level_.objects.size()) {
-      PlacedObject& po = level_.objects[front.objectIndex];
-      po.currentAnim = "ms";
-      po.nextAnim = "ms";
-      po.animFrame = 0;
-    } else if (front.type == TaskStep::Type::TraverseDoor) {
-      if (front.objectIndex >= 0 && front.objectIndex < (int)level_.objects.size()) {
-        PlacedObject& doorIn = level_.objects[front.objectIndex];
-        doorIn.currentAnim = "ms";
-        doorIn.nextAnim = "ms";
-        doorIn.animFrame = 0;
-      }
-      if (front.outObjectIndex >= 0 && front.outObjectIndex < (int)level_.objects.size()) {
-        PlacedObject& doorOut = level_.objects[front.outObjectIndex];
-        doorOut.currentAnim = "ms";
-        doorOut.nextAnim = "ms";
-        doorOut.animFrame = 0;
-      }
-    }
-  }
-  catchSequenceActive_ = true;
-  catchTicks_ = animFrameCount("neighbor", "kill1", 28);
-  woodyQueue_.clear();
-  neighborQueue_.clear();
-  woodyActionTicks_ = woodyActionTotalTicks_ = 0;
-  woody_.hidden = true;  // fight cloud is drawn on neighbor's kill1 animation
-  neighbor_.pos = woody_.pos;
-  neighbor_.currentAnim = "kill1";
-  neighbor_.nextAnim = "ms2";
-  neighbor_.animFrame = 0;
-  playSfx("sfx/wod_fear1.wav");
-  playSfx("sfx/na_beats1.wav");
-  playSfx("sfx/wod_au1.wav");
-  statusBanner_ = "СОСЕД ПОЙМАЛ ВУДИ! (" + std::to_string(catchesCount_ + 1) + "/3)";
-  bannerTicks_ = kTicksPerSecond * 3;
 }
 
 void GameEngine::tickSimulation() {
@@ -2709,7 +2762,7 @@ void GameEngine::tickSimulation() {
   if (screen_ != ScreenState::InGame) return;
   if (!catchSequenceActive_) {
     updateWoody();
-    updateNeighbor();
+    if (!neighborChasing_) updateNeighbor();
   }
 
   // Auto-finish episode once all tricks have been performed and Neighbor finished reacting
@@ -2869,6 +2922,18 @@ void GameEngine::renderWorld() {
         camX_ += (targetX - camX_) * 0.15f;
         camY_ += (targetY - camY_) * 0.15f;
       }
+    }
+    float houseW = float(level_.size.x) * camZoom_;
+    float houseH = float(level_.size.y) * camZoom_;
+    if (houseW <= float(winW_)) {
+      camX_ = (float(winW_) - houseW) * 0.5f;
+    } else {
+      camX_ = std::clamp(camX_, float(winW_) - houseW, 0.0f);
+    }
+    if (houseH <= float(availH)) {
+      camY_ = (float(availH) - houseH) * 0.5f;
+    } else {
+      camY_ = std::clamp(camY_, float(availH) - houseH, 0.0f);
     }
   }
 
@@ -3141,10 +3206,24 @@ void GameEngine::renderEpisodeSelect() {
   fontUI_.drawAligned(menuStrings_["season3"].empty() ? "Сезон 3" : menuStrings_["season3"],
                       menuRect(46, 422, 342, 23), SDL_Color{0, 0, 0, 255}, -1, 0);
 
-  // Season trophy icons on the left margin
-  drawMenuImage("gfx/gui/main/briefingscreen_bronze.tga", 2, 150);
-  drawMenuImage("gfx/gui/main/briefingscreen_silver.tga", 2, 313);
-  drawMenuImage("gfx/gui/main/briefingscreen_gold.tga", 2, 412);
+  auto isSeasonCompleted = [&](const std::initializer_list<const char*>& levelNames) {
+    for (const char* name : levelNames) {
+      auto it = progress_.find(toLowerAscii(name));
+      if (it == progress_.end() || !it->second.completed) return false;
+    }
+    return true;
+  };
+
+  // Season trophy icons on the left margin (only displayed when corresponding season is completed)
+  if (isSeasonCompleted({"level_peep", "level_sofa", "level_mail", "level_pie", "level_piano", "level_bath"})) {
+    drawMenuImage("gfx/gui/main/briefingscreen_bronze.tga", 2, 150);
+  }
+  if (isSeasonCompleted({"level_art", "level_suntan", "level_pig", "level_barbecue"})) {
+    drawMenuImage("gfx/gui/main/briefingscreen_silver.tga", 2, 313);
+  }
+  if (isSeasonCompleted({"level_laundry", "level_fitness", "level_DIY", "level_hunter"})) {
+    drawMenuImage("gfx/gui/main/briefingscreen_gold.tga", 2, 412);
+  }
 
   // 17 Episode buttons
   for (size_t i = 0; i < levels_.size(); ++i) {
@@ -3426,6 +3505,12 @@ void GameEngine::renderConfirmModal() {
 
   Point mp = screenToMenu(mouseX_, mouseY_);
   int bx = 180, by = 175;
+
+  // Solid dark background behind inner message area to prevent transparency bleeding
+  SDL_Rect cardBg = menuRect(bx + 20, by + 50, 400, 100);
+  SDL_SetRenderDrawColor(ren_, 36, 42, 46, 255);
+  SDL_RenderFillRect(ren_, &cardBg);
+
   drawMenuImage("gfx/gui/ingame/messagebox_top.tga", bx, by);
   drawMenuImage("gfx/gui/ingame/mb_head_01.tga", bx + 175, by);
   for (int i = 0; i < 6; ++i) {
@@ -3433,7 +3518,7 @@ void GameEngine::renderConfirmModal() {
   }
   drawMenuImage("gfx/gui/ingame/messagebox_low2.tga", bx, by + 50 + 6 * 16);
 
-  fontUI_.drawWrapped(confirmText_, menuRect(bx + 28, by + 55, 385, 90), SDL_Color{0, 0, 0, 255}, 0, 0);
+  fontUI_.drawWrapped(confirmText_, menuRect(bx + 32, by + 65, 376, 75), SDL_Color{255, 255, 255, 255}, 0, 0);
 
   int lowY = by + 50 + 6 * 16;
   bool hovYes = Rect{bx + 13, lowY + 18, 52, 42}.contains(mp.x, mp.y);
@@ -3626,6 +3711,12 @@ void GameEngine::onMenuClick(Point mp, bool doubleClick) {
   }
 }
 
+void GameEngine::toggleFullscreen() {
+  fullscreen_ = !fullscreen_;
+  SDL_SetWindowFullscreen(window_, fullscreen_ ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
+  SDL_GetRendererOutputSize(ren_, &winW_, &winH_);
+}
+
 void GameEngine::renderCursor() {
   if (screen_ == ScreenState::InGame && selectedInv_ >= 0 && selectedInv_ < (int)inventory_.size()) {
     auto it = level_.inventar.find(toLowerAscii(inventory_[selectedInv_]));
@@ -3801,10 +3892,18 @@ int GameEngine::run() {
               showDebug_ = !showDebug_;
               break;
             case SDLK_r:
-              if (screen_ == ScreenState::InGame || screen_ == ScreenState::LevelSummary) {
+              if (screen_ == ScreenState::InGame) {
+                confirmAction_ = ConfirmAction::RestartEpisode;
+                confirmText_ = menuStrings_["mm_restartlevel"].empty() ? "Вы действительно хотите начать съемки заново?"
+                                                                       : menuStrings_["mm_restartlevel"];
+              } else if (screen_ == ScreenState::LevelSummary) {
                 selectLevel(currentLevelIdx_);
                 enterScreen(ScreenState::InGame);
               }
+              break;
+            case SDLK_F11:
+            case SDLK_t:
+              toggleFullscreen();
               break;
             case SDLK_LEFTBRACKET:
             case SDLK_F1:
