@@ -1069,17 +1069,15 @@ void GameEngine::onLeftClick(int worldX, int worldY, int screenX, int screenY, b
     }
   }
 
-  // Preserve active non-interruptible step (e.g. mid-door traversal or mid-hideout exit/entry or active trick/prank)
+  // Preserve active non-interruptible step (e.g. mid-door traversal or mid-hideout exit/entry or active trick/prank/item pickup)
   if (!woodyQueue_.empty()) {
     const TaskStep& front = woodyQueue_.front();
     bool keepFront = (front.type == TaskStep::Type::TraverseDoor && front.elapsedTicks > 0) ||
-                     (front.type == TaskStep::Type::PlayAction && front.nonInterruptible && front.elapsedTicks > 0);
+                     (front.type == TaskStep::Type::PlayAction && front.nonInterruptible);
     if (keepFront) {
-      TaskStep saved = front;
-      woodyQueue_.clear();
-      woodyQueue_.push_back(saved);
-    } else {
-      if (front.type == TaskStep::Type::PlayAction && front.objectIndex >= 0 &&
+      return;
+    }
+    if (front.type == TaskStep::Type::PlayAction && front.objectIndex >= 0 &&
           front.objectIndex < (int)level_.objects.size()) {
         PlacedObject& po = level_.objects[front.objectIndex];
         po.currentAnim = "ms";
@@ -1105,7 +1103,6 @@ void GameEngine::onLeftClick(int worldX, int worldY, int screenX, int screenY, b
       }
       woodyQueue_.clear();
       woodyActionTicks_ = woodyActionTotalTicks_ = 0;
-    }
   } else {
     woodyActionTicks_ = woodyActionTotalTicks_ = 0;
   }
@@ -1607,6 +1604,7 @@ void GameEngine::updateWoody() {
             stTake.objNextAnim = openObjAnim.empty() ? "ms" : openObjAnim;
             stTake.durationTicks = animFrameCount("woody", takeActorAnim, 12);
             stTake.giveContainerItems = true;
+            stTake.nonInterruptible = true;
             seq.push_back(stTake);
           } else {
             TaskStep stDecline{};
@@ -2852,7 +2850,7 @@ bool GameEngine::drawMenuButton(const std::string& stdImg, const std::string& ho
   }
   if (!caption.empty()) {
     SDL_Rect textBox = menuRect(x + 8, y + (hovered && mouseDown ? 2 : 0), bw - 16, bh);
-    font.drawAligned(caption, textBox, hovered ? hovColor : stdColor, 0, 0);
+    font.drawAligned(caption, textBox, hovered ? hovColor : stdColor, 0, 0, menuScale());
   }
   return hovered;
 }
@@ -3198,7 +3196,7 @@ void GameEngine::renderMainMenu() {
                  fontBig_, cStd, cHov, mp, mouseLeftDown_);
 
   fontSmall_.drawAligned("OpenNFH v0.2.0 (Buka / JoWooD 1.11)", menuRect(12, 570, 770, 24),
-                         SDL_Color{230, 230, 230, 220}, -1, 1);
+                         SDL_Color{230, 230, 230, 220}, -1, 1, menuScale());
 }
 
 void GameEngine::renderBriefingRightPanel(int levelIdx, bool isInGameMenu) {
