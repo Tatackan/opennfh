@@ -25,6 +25,8 @@ struct GameOptions {
   int screenshotTicks = 60;              // how many ticks to simulate before screenshot
   std::string recordDir;                 // optional --record-dir DIR to dump frames & anomaly log
   int recordStride = 2;                  // save every Nth tick when recording video frames
+  int windowW = 0;                       // custom window width
+  int windowH = 0;                       // custom window height
 };
 
 class GameEngine {

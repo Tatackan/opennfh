@@ -95,6 +95,14 @@ int TextRenderer::draw(const std::string& s, int x, int y, SDL_Color c, int maxW
   return w;
 }
 
+int TextRenderer::drawScaled(const std::string& s, float x, float y, float scale, SDL_Color c) {
+  Cached* e = get(s, c);
+  if (!e) return 0;
+  SDL_FRect dst{x, y, float(e->w) * scale, float(e->h) * scale};
+  SDL_RenderCopyF(r_, e->tex, nullptr, &dst);
+  return int(e->w * scale);
+}
+
 void TextRenderer::drawAligned(const std::string& s, const SDL_Rect& box, SDL_Color c, int halign, int valign) {
   Cached* e = get(s, c);
   if (!e) return;
@@ -111,6 +119,23 @@ void TextRenderer::drawAligned(const std::string& s, const SDL_Rect& box, SDL_Co
   SDL_Rect src{0, 0, w, h};
   SDL_Rect dst{x, y, w, h};
   SDL_RenderCopy(r_, e->tex, &src, &dst);
+}
+
+void TextRenderer::drawAlignedScaled(const std::string& s, const SDL_FRect& box, SDL_Color c, float scale, int halign, int valign) {
+  Cached* e = get(s, c);
+  if (!e) return;
+  float w = float(e->w) * scale;
+  float h = float(e->h) * scale;
+  float x = box.x;
+  if (halign == 0) x = box.x + (box.w - w) * 0.5f;
+  else if (halign > 0) x = box.x + box.w - w;
+
+  float y = box.y;
+  if (valign == 0) y = box.y + (box.h - h) * 0.5f;
+  else if (valign > 0) y = box.y + box.h - h;
+
+  SDL_FRect dst{x, y, w, h};
+  SDL_RenderCopyF(r_, e->tex, nullptr, &dst);
 }
 
 void TextRenderer::drawWrapped(const std::string& s, const SDL_Rect& box, SDL_Color c, int halign, int valign) {

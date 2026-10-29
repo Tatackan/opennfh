@@ -72,6 +72,10 @@ bool GameEngine::init(const GameOptions& opts) {
   if (audioOk_) Mix_AllocateChannels(16);
 
   SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, "1");
+  if (opts.windowW > 0 && opts.windowH > 0) {
+    winW_ = opts.windowW;
+    winH_ = opts.windowH;
+  }
   window_ = SDL_CreateWindow("OpenNFH - Как достать соседа: Сладкая месть", SDL_WINDOWPOS_CENTERED,
                              SDL_WINDOWPOS_CENTERED, winW_, winH_, SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI);
   if (!window_) return false;
@@ -148,7 +152,31 @@ bool GameEngine::init(const GameOptions& opts) {
     enterScreen(ScreenState::InGame);
     confirmAction_ = ConfirmAction::RestartEpisode;
     confirmText_ = "Вы действительно хотите начать съемки заново?";
-  } else if (opts.startInLevel || !opts.screenshot.empty()) {
+  } else if (scr == "test_decline") {
+    enterScreen(ScreenState::InGame);
+    for (size_t i = 0; i < level_.objects.size(); ++i) {
+      PlacedObject& po = level_.objects[i];
+      const ObjectDef* od = level_.findObjectDef(po.name);
+      if (od && (od->hasFlag("container") || !po.items.empty())) {
+        po.items.clear();
+        woody_.room = po.roomName;
+        Point targetPos = od->hotspotOr("woody", Point{450, 420});
+        woody_.pos = Point{po.position.x + targetPos.x, po.position.y + targetPos.y};
+        woodyQueue_.clear();
+        TaskStep inter{};
+        inter.type = TaskStep::Type::InteractObject;
+        inter.objectIndex = (int)i;
+        woodyQueue_.push_back(inter);
+        std::printf("Triggered test_decline on object %s (idx %d)\n", po.name.c_str(), (int)i);
+        break;
+      }
+    }
+  } else if (scr == "test_progress") {
+    enterScreen(ScreenState::InGame);
+    fullHouseView_ = true;
+    woodyActionTotalTicks_ = 100;
+    woodyActionTicks_ = 27; // 73%
+  } else if (opts.startInLevel || !opts.screenshot.empty() || !opts.recordDir.empty()) {
     enterScreen(ScreenState::InGame);
   } else {
     enterScreen(ScreenState::MainMenu);
@@ -781,29 +809,30 @@ void GameEngine::updateHover(int worldX, int worldY, int screenX, int screenY) {
   if (screen_ != ScreenState::InGame) return;
 
   // Check if mouse is over bottom HUD
-  if (screenY >= winH_ - 130) {
-    int hudLeft = (winW_ - 800) / 2;
-    int hudTop = winH_ - 600;
-    Rect missionBtn{hudLeft + 581 + 167, hudTop + 471 + 20, 48, 36};
-    if (missionBtn.contains(screenX, screenY)) {
+  const float hudScale = std::min(float(winW_) / 800.0f, float(winH_) / 480.0f);
+  const float hudX = (float(winW_) - 800.0f * hudScale) * 0.5f;
+  const float hudY = float(winH_) - 600.0f * hudScale;
+  if (screenY >= winH_ - int(134 * hudScale)) {
+    int hx = int((screenX - hudX) / hudScale);
+    int hy = int((screenY - hudY) / hudScale);
+    Rect missionBtn{581 + 167, 471 + 20, 48, 36};
+    if (missionBtn.contains(hx, hy)) {
       hoverText_ = "Игровое меню (Esc)";
       cursorVpath_ = "gfx/cursor/use.tga";
       return;
     }
-    if (screenY >= winH_ - 110) {
-      for (int slot = 0; slot < 5; ++slot) {
-        int idx = invScroll_ + slot;
-        if (idx >= (int)inventory_.size()) break;
-        Rect r{hudLeft + 123 + 41 + slot * 75, winH_ - 89 + 26, 60, 55};
-        if (r.contains(screenX, screenY)) {
-          std::string itemName = level_.getString(inventory_[idx], "name");
-          hoverText_ = itemName.empty() ? inventory_[idx] : itemName;
-          cursorVpath_ = "gfx/cursor/use.tga";
-          return;
-        }
+    for (int slot = 0; slot < 5; ++slot) {
+      int idx = invScroll_ + slot;
+      if (idx >= (int)inventory_.size()) break;
+      Rect r{123 + 41 + slot * 75, 511 + 26, 60, 55};
+      if (r.contains(hx, hy)) {
+        std::string itemName = level_.getString(inventory_[idx], "name");
+        hoverText_ = itemName.empty() ? inventory_[idx] : itemName;
+        cursorVpath_ = "gfx/cursor/use.tga";
+        return;
       }
-      return;
     }
+    return;
   }
 
   const std::string heldItem = (selectedInv_ >= 0 && selectedInv_ < (int)inventory_.size()) ? inventory_[selectedInv_] : std::string();
@@ -999,33 +1028,36 @@ void GameEngine::onLeftClick(int worldX, int worldY, int screenX, int screenY, b
   if (catchSequenceActive_) return;
 
   // Check HUD clicks first
-  if (screenY >= winH_ - 130) {
-    int hudLeft = (winW_ - 800) / 2;
-    int hudTop = winH_ - 600;
-    Rect missionBtn{hudLeft + 581 + 167, hudTop + 471 + 20, 48, 36};
-    if (missionBtn.contains(screenX, screenY)) {
+  const float hudScale = std::min(float(winW_) / 800.0f, float(winH_) / 480.0f);
+  const float hudX = (float(winW_) - 800.0f * hudScale) * 0.5f;
+  const float hudY = float(winH_) - 600.0f * hudScale;
+  if (screenY >= winH_ - int(134 * hudScale)) {
+    int hx = int((screenX - hudX) / hudScale);
+    int hy = int((screenY - hudY) / hudScale);
+    Rect missionBtn{581 + 167, 471 + 20, 48, 36};
+    if (missionBtn.contains(hx, hy)) {
       playSfx("sfx/but1.wav");
       enterScreen(ScreenState::PauseMenu);
       return;
     }
-    Rect leftArr{hudLeft + 123, hudTop + 547, 36, 36};
-    Rect rightArr{hudLeft + 123 + 422, hudTop + 547, 36, 36};
-    if (leftArr.contains(screenX, screenY)) {
+    Rect leftArr{123, 547, 36, 36};
+    Rect rightArr{123 + 422, 547, 36, 36};
+    if (leftArr.contains(hx, hy)) {
       if (invScroll_ > 0) invScroll_--;
       playSfx("sfx/but1.wav");
       return;
     }
-    if (rightArr.contains(screenX, screenY)) {
+    if (rightArr.contains(hx, hy)) {
       if (invScroll_ + 5 < (int)inventory_.size()) invScroll_++;
       playSfx("sfx/but1.wav");
       return;
     }
-    if (screenY >= winH_ - 110) {
+    if (hy >= 530) {
       for (int slot = 0; slot < 5; ++slot) {
         int idx = invScroll_ + slot;
         if (idx >= (int)inventory_.size()) break;
-        Rect r{hudLeft + 123 + 41 + slot * 75, winH_ - 89 + 26, 60, 55};
-        if (r.contains(screenX, screenY)) {
+        Rect r{123 + 41 + slot * 75, 511 + 26, 60, 55};
+        if (r.contains(hx, hy)) {
           selectedInv_ = (selectedInv_ == idx) ? -1 : idx;
           playSfx("sfx/but1.wav");
           return;
@@ -1139,7 +1171,7 @@ void GameEngine::onLeftClick(int worldX, int worldY, int screenX, int screenY, b
       }
     }
 
-    // Check combination (with held item, or bare-hand trick, or auto-match if player has the needed item!)
+    // Check combination (with held item, or bare-hand trick without item)
     const CombinationDef* combo = nullptr;
     if (!heldItem.empty()) {
       combo = findCombination(po.name, heldItem);
@@ -1152,16 +1184,6 @@ void GameEngine::onLeftClick(int worldX, int worldY, int screenX, int screenY, b
       }
     } else {
       combo = findCombination(po.name, "");
-      if (!combo) {
-        for (const std::string& invItem : inventory_) {
-          if (const CombinationDef* c = findCombination(po.name, invItem)) {
-            if (!c->isWrong) {
-              combo = c;
-              break;
-            }
-          }
-        }
-      }
     }
 
     Point targetPos = od ? od->hotspotOr("woody", Point{450, 420}) : Point{450, 420};
@@ -1588,13 +1610,12 @@ void GameEngine::updateWoody() {
             TaskStep stDecline{};
             stDecline.type = TaskStep::Type::PlayAction;
             stDecline.objectIndex = idx;
-            stDecline.actorAnim = "nono";
+            stDecline.actorAnim = "decline";
             stDecline.actorNextAnim = finalNextAnim;
             stDecline.objAnim = openObjAnim;
             stDecline.objNextAnim = openObjAnim.empty() ? "ms" : openObjAnim;
-            stDecline.durationTicks = animFrameCount("woody", "nono", 18);
+            stDecline.durationTicks = animFrameCount("woody", "decline", 19);
             seq.push_back(stDecline);
-            playSfx("sfx/wod_nono.wav");
             statusBanner_ = "Пусто!";
             bannerTicks_ = kTicksPerSecond * 2;
           }
@@ -2891,7 +2912,7 @@ void GameEngine::renderActor(const ActorState& a) {
     const TexEntry* pbBack = getTexture("gfx/gui/ingame/ingame_progress_back.tga");
     const TexEntry* pbFront = getTexture("gfx/gui/ingame/ingame_progress_front.tga");
     if (pbBack && pbFront) {
-      float pbx = float(r->offset.x + a.pos.x - 30);
+      float pbx = float(r->offset.x + a.pos.x) - float(pbBack->w) * 0.5f;
       float pby = float(r->offset.y + a.pos.y - 130);
       SDL_FRect bDst = worldToScreen(pbx, pby, float(pbBack->w), float(pbBack->h));
       SDL_RenderCopyF(ren_, pbBack->tex, nullptr, &bDst);
@@ -2900,13 +2921,33 @@ void GameEngine::renderActor(const ActorState& a) {
       SDL_Rect src{0, 0, srcW, pbFront->h};
       SDL_FRect fDst = worldToScreen(pbx, pby, float(srcW), float(pbFront->h));
       SDL_RenderCopyF(ren_, pbFront->tex, &src, &fDst);
+
+      // Centered percentage text with black outline (e.g. "73%")
+      int pct = std::clamp(int(std::round(frac * 100.0f)), 0, 100);
+      char pctBuf[16];
+      std::snprintf(pctBuf, sizeof pctBuf, "%d%%", pct);
+      float tScale = (bDst.h > 0.0f) ? (bDst.h * 0.72f / 26.0f) : 1.0f;
+      float o = std::max(1.0f, tScale * 1.5f);
+      SDL_Color black{0, 0, 0, 255};
+      SDL_Color yellow{255, 235, 40, 255};
+      fontHud_.drawAlignedScaled(pctBuf, SDL_FRect{bDst.x + o, bDst.y, bDst.w, bDst.h}, black, tScale, 0, 0);
+      fontHud_.drawAlignedScaled(pctBuf, SDL_FRect{bDst.x - o, bDst.y, bDst.w, bDst.h}, black, tScale, 0, 0);
+      fontHud_.drawAlignedScaled(pctBuf, SDL_FRect{bDst.x, bDst.y + o, bDst.w, bDst.h}, black, tScale, 0, 0);
+      fontHud_.drawAlignedScaled(pctBuf, SDL_FRect{bDst.x, bDst.y - o, bDst.w, bDst.h}, black, tScale, 0, 0);
+      fontHud_.drawAlignedScaled(pctBuf, SDL_FRect{bDst.x + o, bDst.y + o, bDst.w, bDst.h}, black, tScale, 0, 0);
+      fontHud_.drawAlignedScaled(pctBuf, SDL_FRect{bDst.x - o, bDst.y - o, bDst.w, bDst.h}, black, tScale, 0, 0);
+      fontHud_.drawAlignedScaled(pctBuf, SDL_FRect{bDst.x + o, bDst.y - o, bDst.w, bDst.h}, black, tScale, 0, 0);
+      fontHud_.drawAlignedScaled(pctBuf, SDL_FRect{bDst.x - o, bDst.y + o, bDst.w, bDst.h}, black, tScale, 0, 0);
+      fontHud_.drawAlignedScaled(pctBuf, bDst, yellow, tScale, 0, 0);
     }
   }
 }
 
 void GameEngine::renderWorld() {
   // Update camera placement
-  const int availH = std::max(200, winH_ - 100);
+  const float hudScale = std::min(float(winW_) / 800.0f, float(winH_) / 480.0f);
+  const int hudHeight = int(134 * hudScale);
+  const int availH = std::max(200, winH_ - hudHeight);
   if (fullHouseView_) {
     float zx = float(winW_) / float(level_.size.x);
     float zy = float(availH) / float(level_.size.y);
@@ -2974,20 +3015,23 @@ void GameEngine::renderWorld() {
 }
 
 void GameEngine::renderHud() {
-  // Original 800x600 bottom HUD anchored at the bottom center of the window
-  const int hudX = (winW_ - 800) / 2;
-  const int hudY = winH_ - 600;
+  const float hudScale = std::min(float(winW_) / 800.0f, float(winH_) / 480.0f);
+  const float hudW = 800.0f * hudScale;
+  const float hudH = 600.0f * hudScale;
+  const float hudX = (float(winW_) - hudW) * 0.5f;
+  const float hudY = float(winH_) - hudH;
 
-  auto drawGui = [&](const std::string& vpath, int ox, int oy) {
+  auto drawGui = [&](const std::string& vpath, float ox, float oy) {
     if (const TexEntry* t = getTexture(vpath)) {
-      SDL_Rect dst{hudX + ox, hudY + oy, t->w, t->h};
-      SDL_RenderCopy(ren_, t->tex, nullptr, &dst);
+      SDL_FRect dst{hudX + ox * hudScale, hudY + oy * hudScale, float(t->w) * hudScale, float(t->h) * hudScale};
+      SDL_RenderCopyF(ren_, t->tex, nullptr, &dst);
     }
   };
 
   // Darken strip behind HUD
+  int hudStripH = int(134 * hudScale);
   SDL_SetRenderDrawColor(ren_, 18, 20, 26, 235);
-  SDL_Rect strip{0, winH_ - 95, winW_, 95};
+  SDL_Rect strip{0, winH_ - hudStripH, winW_, hudStripH};
   SDL_RenderFillRect(ren_, &strip);
 
   // Left: thought bubble, rage-o-meter, neighbor head
@@ -3005,8 +3049,8 @@ void GameEngine::renderHud() {
       int h = int(front->h * frac);
       int dy = front->h - h;
       SDL_Rect src{0, dy, front->w, h};
-      SDL_Rect dst{hudX + 85, hudY + 486 + dy, front->w, h};
-      SDL_RenderCopy(ren_, front->tex, &src, &dst);
+      SDL_FRect dst{hudX + 85.0f * hudScale, hudY + (486.0f + dy) * hudScale, float(front->w) * hudScale, float(h) * hudScale};
+      SDL_RenderCopyF(ren_, front->tex, &src, &dst);
     }
   }
 
@@ -3023,33 +3067,34 @@ void GameEngine::renderHud() {
   drawGui("gfx/gui/ingame/scroll_right_std.tga", 123 + 422, 547);
 
   if (!hoverText_.empty()) {
-    fontUI_.draw(hoverText_, hudX + 135, hudY + 513, SDL_Color{255, 255, 255, 255}, 440);
+    fontUI_.drawScaled(hoverText_, hudX + 135.0f * hudScale, hudY + 513.0f * hudScale, hudScale, SDL_Color{255, 255, 255, 255});
   }
 
   for (int slot = 0; slot < 5; ++slot) {
     int idx = invScroll_ + slot;
     if (idx >= (int)inventory_.size()) break;
-    int sx = hudX + 123 + 41 + slot * 75;
-    int sy = hudY + 511 + 26;
+    float sx = hudX + (123.0f + 41.0f + slot * 75.0f) * hudScale;
+    float sy = hudY + (511.0f + 26.0f) * hudScale;
     if (idx == selectedInv_) {
       SDL_SetRenderDrawColor(ren_, 240, 190, 60, 110);
-      SDL_Rect hi{sx - 2, sy - 2, 64, 56};
-      SDL_RenderFillRect(ren_, &hi);
+      SDL_FRect hi{sx - 2.0f * hudScale, sy - 2.0f * hudScale, 64.0f * hudScale, 56.0f * hudScale};
+      SDL_RenderFillRectF(ren_, &hi);
     }
     auto it = level_.inventar.find(toLowerAscii(inventory_[idx]));
     if (it != level_.inventar.end()) {
       const std::string& iconPath = (idx == selectedInv_ && !it->second.gfxHover.empty()) ? it->second.gfxHover : it->second.gfxStd;
       if (const TexEntry* t = getTexture(iconPath)) {
-        SDL_Rect dst{sx, sy, t->w, t->h};
-        SDL_RenderCopy(ren_, t->tex, nullptr, &dst);
+        SDL_FRect dst{sx, sy, float(t->w) * hudScale, float(t->h) * hudScale};
+        SDL_RenderCopyF(ren_, t->tex, nullptr, &dst);
       }
     }
   }
 
   // Right: TV panel (timer, quota %, tricks count, and interactive Mission/Menu button)
   drawGui("gfx/gui/ingame/interface_right.tga", 581, 471);
-  Rect missionBtn{hudX + 581 + 167, hudY + 471 + 20, 48, 36};
-  bool missionHov = missionBtn.contains(mouseX_, mouseY_);
+  float hx = (float(mouseX_) - hudX) / hudScale;
+  float hy = (float(mouseY_) - hudY) / hudScale;
+  bool missionHov = Rect{581 + 167, 471 + 20, 48, 36}.contains(int(hx), int(hy));
   drawGui(missionHov ? (mouseLeftDown_ ? "gfx/gui/ingame/mission_pressed.tga" : "gfx/gui/ingame/mission_hover.tga")
                      : "gfx/gui/ingame/mission_normal.tga",
           581 + 167, 471 + 20);
@@ -3061,16 +3106,16 @@ void GameEngine::renderHud() {
     int secs = std::max(0, remainingTicks_ / kTicksPerSecond);
     std::snprintf(timeBuf, sizeof timeBuf, "%02d:%02d", secs / 60, secs % 60);
   }
-  fontHud_.draw(timeBuf, hudX + 581 + 98, hudY + 471 + 20, SDL_Color{140, 215, 215, 255});
+  fontHud_.drawScaled(timeBuf, hudX + (581.0f + 98.0f) * hudScale, hudY + (471.0f + 20.0f) * hudScale, hudScale, SDL_Color{140, 215, 215, 255});
 
   char quotaBuf[32];
   std::snprintf(quotaBuf, sizeof quotaBuf, "%d%%", quota_);
   SDL_Color qColor = (quota_ >= level_.info.minQuota) ? SDL_Color{120, 240, 130, 255} : SDL_Color{255, 255, 255, 255};
-  fontHud_.draw(quotaBuf, hudX + 581 + 78, hudY + 471 + 90, qColor);
+  fontHud_.drawScaled(quotaBuf, hudX + (581.0f + 78.0f) * hudScale, hudY + (471.0f + 90.0f) * hudScale, hudScale, qColor);
 
   char trickBuf[32];
   std::snprintf(trickBuf, sizeof trickBuf, "%d/%d", tricksDone_, level_.info.reachable);
-  fontUI_.draw(trickBuf, hudX + 581 + 170, hudY + 471 + 68, SDL_Color{245, 240, 90, 255});
+  fontUI_.drawScaled(trickBuf, hudX + (581.0f + 170.0f) * hudScale, hudY + (471.0f + 68.0f) * hudScale, hudScale, SDL_Color{245, 240, 90, 255});
 
   // Top status banner
   if (bannerTicks_ > 0 && !statusBanner_.empty()) {
@@ -3504,23 +3549,18 @@ void GameEngine::renderConfirmModal() {
   SDL_RenderFillRect(ren_, &full);
 
   Point mp = screenToMenu(mouseX_, mouseY_);
-  int bx = 180, by = 175;
-
-  // Solid dark background behind inner message area to prevent transparency bleeding
-  SDL_Rect cardBg = menuRect(bx + 20, by + 50, 400, 100);
-  SDL_SetRenderDrawColor(ren_, 36, 42, 46, 255);
-  SDL_RenderFillRect(ren_, &cardBg);
+  int bx = 180, by = 170;
 
   drawMenuImage("gfx/gui/ingame/messagebox_top.tga", bx, by);
-  drawMenuImage("gfx/gui/ingame/mb_head_01.tga", bx + 175, by);
-  for (int i = 0; i < 6; ++i) {
-    drawMenuImage("gfx/gui/ingame/messagebox_mid.tga", bx, by + 50 + i * 16);
+  drawMenuImage("gfx/gui/ingame/mb_head_01.tga", bx + 172, by);
+  for (int i = 0; i < 3; ++i) {
+    drawMenuImage("gfx/gui/ingame/messagebox_mid.tga", bx, by + 100 + i * 20);
   }
-  drawMenuImage("gfx/gui/ingame/messagebox_low2.tga", bx, by + 50 + 6 * 16);
+  int lowY = by + 160;
+  drawMenuImage("gfx/gui/ingame/messagebox_low2.tga", bx, lowY);
 
-  fontUI_.drawWrapped(confirmText_, menuRect(bx + 32, by + 65, 376, 75), SDL_Color{255, 255, 255, 255}, 0, 0);
+  fontUI_.drawWrapped(confirmText_, menuRect(bx + 35, by + 75, 370, 75), SDL_Color{255, 255, 255, 255}, 0, 0);
 
-  int lowY = by + 50 + 6 * 16;
   bool hovYes = Rect{bx + 13, lowY + 18, 52, 42}.contains(mp.x, mp.y);
   bool hovNo = Rect{bx + 375, lowY + 18, 52, 42}.contains(mp.x, mp.y);
   drawMenuImage(hovYes ? (mouseLeftDown_ ? "gfx/gui/ingame/messagebox_ok_pressed.tga" : "gfx/gui/ingame/messagebox_ok_hover.tga")
@@ -3534,7 +3574,7 @@ void GameEngine::renderConfirmModal() {
 void GameEngine::onMenuClick(Point mp, bool doubleClick) {
   // Handle confirmation modal first if active
   if (confirmAction_ != ConfirmAction::None) {
-    int bx = 180, lowY = 175 + 50 + 6 * 16;
+    int bx = 180, lowY = 170 + 160;
     if (Rect{bx + 13, lowY + 18, 52, 42}.contains(mp.x, mp.y)) {
       playSfx("sfx/but1.wav");
       ConfirmAction act = confirmAction_;
@@ -3718,19 +3758,21 @@ void GameEngine::toggleFullscreen() {
 }
 
 void GameEngine::renderCursor() {
+  const float scale = std::max(1.0f, std::min(float(winW_) / 800.0f, float(winH_) / 480.0f));
   if (screen_ == ScreenState::InGame && selectedInv_ >= 0 && selectedInv_ < (int)inventory_.size()) {
     auto it = level_.inventar.find(toLowerAscii(inventory_[selectedInv_]));
     if (it != level_.inventar.end()) {
       if (const TexEntry* itex = getTexture(it->second.gfxStd)) {
-        SDL_Rect dst{mouseX_ + 10, mouseY_ + 10, itex->w * 3 / 4, itex->h * 3 / 4};
-        SDL_RenderCopy(ren_, itex->tex, nullptr, &dst);
+        SDL_FRect dst{float(mouseX_) + 10.0f * scale, float(mouseY_) + 10.0f * scale,
+                      float(itex->w) * 0.75f * scale, float(itex->h) * 0.75f * scale};
+        SDL_RenderCopyF(ren_, itex->tex, nullptr, &dst);
       }
     }
   }
   const std::string& curPath = (screen_ == ScreenState::InGame) ? cursorVpath_ : std::string("gfx/cursor/normal.tga");
   if (const TexEntry* ctex = getTexture(curPath)) {
-    SDL_Rect dst{mouseX_, mouseY_, ctex->w, ctex->h};
-    SDL_RenderCopy(ren_, ctex->tex, nullptr, &dst);
+    SDL_FRect dst{float(mouseX_), float(mouseY_), float(ctex->w) * scale, float(ctex->h) * scale};
+    SDL_RenderCopyF(ren_, ctex->tex, nullptr, &dst);
   }
 }
 

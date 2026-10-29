@@ -27,6 +27,8 @@ int main(int argc, char** argv) {
     else if (a == "--ticks" && hasNext) opts.screenshotTicks = std::atoi(args[++i].c_str());
     else if (a == "--record-dir" && hasNext) opts.recordDir = args[++i];
     else if (a == "--stride" && hasNext) opts.recordStride = std::max(1, std::atoi(args[++i].c_str()));
+    else if ((a == "--width" || a == "-W") && hasNext) opts.windowW = std::atoi(args[++i].c_str());
+    else if ((a == "--height" || a == "-H") && hasNext) opts.windowH = std::atoi(args[++i].c_str());
     else if (a == "-h" || a == "--help") {
       std::printf(
           "OpenNFH - Neighbours from Hell 1 engine\n"
