@@ -1080,8 +1080,11 @@ void GameEngine::onLeftClick(int worldX, int worldY, int screenX, int screenY, b
     if (front.type == TaskStep::Type::PlayAction && front.objectIndex >= 0 &&
           front.objectIndex < (int)level_.objects.size()) {
         PlacedObject& po = level_.objects[front.objectIndex];
-        po.currentAnim = "ms";
-        po.nextAnim = "ms";
+        const ObjectDef* od = level_.findObjectDef(po.name);
+        const GfxObjectDef* gd = level_.findGfxObject(od ? od->gfx : po.name);
+        std::string resetAnim = (po.items.empty() && gd && gd->anims.count("empty") > 0) ? "empty" : "ms";
+        po.currentAnim = resetAnim;
+        po.nextAnim = resetAnim;
         po.animFrame = 0;
       } else if (front.type == TaskStep::Type::TraverseDoor) {
         if (front.objectIndex >= 0 && front.objectIndex < (int)level_.objects.size()) {
@@ -1464,6 +1467,15 @@ void GameEngine::updateWoody() {
               statusBanner_ = "Получено: " + gained;
               bannerTicks_ = kTicksPerSecond * 3;
             }
+            if (po.items.empty() && !step.applyComboOnFinish) {
+              const ObjectDef* od = level_.findObjectDef(po.name);
+              const GfxObjectDef* gd = level_.findGfxObject(od ? od->gfx : po.name);
+              if (gd && gd->anims.count("empty") > 0) {
+                po.currentAnim = "empty";
+                po.nextAnim = "empty";
+                po.animFrame = 0;
+              }
+            }
             if (step.applyComboOnFinish && !resultIsInv && step.combo.removeTarget) {
               po.name = step.combo.resultObject;
               po.currentAnim = "ms";
@@ -1613,7 +1625,9 @@ void GameEngine::updateWoody() {
             stDecline.actorAnim = "decline";
             stDecline.actorNextAnim = finalNextAnim;
             stDecline.objAnim = openObjAnim;
-            stDecline.objNextAnim = openObjAnim.empty() ? "ms" : openObjAnim;
+            const GfxObjectDef* gd = level_.findGfxObject(od ? od->gfx : po.name);
+            std::string defObjNext = (gd && gd->anims.count("empty") > 0) ? "empty" : "ms";
+            stDecline.objNextAnim = openObjAnim.empty() ? defObjNext : openObjAnim;
             stDecline.durationTicks = animFrameCount("woody", "decline", 19);
             seq.push_back(stDecline);
             statusBanner_ = "Пусто!";
