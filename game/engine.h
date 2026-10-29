@@ -281,6 +281,7 @@ class GameEngine {
   float camX_ = 0.0f, camY_ = 0.0f;
   float camZoom_ = 1.0f;
   bool camDragging_ = false;
+  float camEdgeOffsetX_ = 0.0f, camEdgeOffsetY_ = 0.0f;
 
   // Game state
   ActorState woody_;

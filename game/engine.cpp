@@ -173,9 +173,8 @@ bool GameEngine::init(const GameOptions& opts) {
     }
   } else if (scr == "test_progress") {
     enterScreen(ScreenState::InGame);
-    fullHouseView_ = true;
     woodyActionTotalTicks_ = 100;
-    woodyActionTicks_ = 27; // 73%
+    woodyActionTicks_ = 27;
   } else if (opts.startInLevel || !opts.screenshot.empty() || !opts.recordDir.empty()) {
     enterScreen(ScreenState::InGame);
   } else {
@@ -440,6 +439,9 @@ void GameEngine::enterScreen(ScreenState st) {
 }
 
 void GameEngine::finishEpisode(bool timeExpired, bool caughtOut) {
+  if (!timeExpired && !caughtOut && level_.info.reachable > 0 && tricksDone_ >= level_.info.reachable) {
+    quota_ = 100;
+  }
   quota_ = std::clamp(quota_, 0, 100);
   summaryTimeExpired_ = timeExpired;
   summarySuccess_ = !timeExpired && !caughtOut && (quota_ >= level_.info.minQuota);
@@ -2960,6 +2962,44 @@ void GameEngine::renderWorld() {
       if (const RoomDef* wr = level_.findRoom(woody_.room)) {
         float targetX = winW_ * 0.5f - (wr->offset.x + woody_.pos.x) * camZoom_;
         float targetY = availH * 0.5f - (wr->offset.y + woody_.pos.y - 80) * camZoom_;
+
+        // Edge scrolling when mouse cursor approaches window edges
+        const int edgeMargin = 50;
+        const float scrollSpeed = 16.0f;
+        bool edgeScrolling = false;
+        if (screen_ == ScreenState::InGame && confirmAction_ == ConfirmAction::None) {
+          if (mouseX_ >= 0 && mouseX_ <= winW_ && mouseY_ >= 0 && mouseY_ <= availH) {
+            if (mouseX_ < edgeMargin) {
+              camEdgeOffsetX_ += scrollSpeed;
+              edgeScrolling = true;
+            } else if (mouseX_ > winW_ - edgeMargin) {
+              camEdgeOffsetX_ -= scrollSpeed;
+              edgeScrolling = true;
+            }
+            if (mouseY_ < edgeMargin) {
+              camEdgeOffsetY_ += scrollSpeed;
+              edgeScrolling = true;
+            } else if (mouseY_ > availH - edgeMargin) {
+              camEdgeOffsetY_ -= scrollSpeed;
+              edgeScrolling = true;
+            }
+          }
+        }
+        if (!edgeScrolling) {
+          camEdgeOffsetX_ *= 0.90f;
+          camEdgeOffsetY_ *= 0.90f;
+          if (std::abs(camEdgeOffsetX_) < 0.5f) camEdgeOffsetX_ = 0.0f;
+          if (std::abs(camEdgeOffsetY_) < 0.5f) camEdgeOffsetY_ = 0.0f;
+        } else {
+          float maxScrollX = float(level_.size.x) * camZoom_;
+          float maxScrollY = float(level_.size.y) * camZoom_;
+          camEdgeOffsetX_ = std::clamp(camEdgeOffsetX_, -maxScrollX, maxScrollX);
+          camEdgeOffsetY_ = std::clamp(camEdgeOffsetY_, -maxScrollY, maxScrollY);
+        }
+
+        targetX += camEdgeOffsetX_;
+        targetY += camEdgeOffsetY_;
+
         camX_ += (targetX - camX_) * 0.15f;
         camY_ += (targetY - camY_) * 0.15f;
       }

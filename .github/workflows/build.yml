@@ -54,12 +54,13 @@ jobs:
                    dist/opennfh-linux-x86_64/nfh-extract \
                    dist/opennfh-linux-x86_64/run-opennfh.sh
           tar -C dist -czf opennfh-linux-x86_64.tar.gz opennfh-linux-x86_64
+          (cd dist && zip -rq ../opennfh-linux-x86_64.zip opennfh-linux-x86_64)
 
       - name: Upload Linux Artifact
         uses: actions/upload-artifact@v4
         with:
           name: opennfh-linux-x86_64
-          path: opennfh-linux-x86_64.tar.gz
+          path: dist/opennfh-linux-x86_64
 
       - name: Publish Linux Build to GitHub Releases
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
@@ -82,4 +83,6 @@ jobs:
                ./opennfh --game "/путь/к/Как достать соседа"
                ```
           prerelease: false
-          files: opennfh-linux-x86_64.tar.gz
+          files: |
+            opennfh-linux-x86_64.tar.gz
+            opennfh-linux-x86_64.zip
