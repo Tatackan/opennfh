@@ -49,6 +49,10 @@ GameEngine::~GameEngine() {
   fontHud_.close();
   fontSmall_.close();
   fontTitle_.close();
+  fontComic_.close();
+  fontComicBig_.close();
+  fontComicSmall_.close();
+  fontSeason_.close();
   if (audioOk_) Mix_CloseAudio();
   Mix_Quit();
   if (ren_) SDL_DestroyRenderer(ren_);
@@ -97,14 +101,44 @@ bool GameEngine::init(const GameOptions& opts) {
   if (!opts.gamePath.empty()) GameData::rememberPath(exeDir, gamePath);
 
   auto sysFonts = systemFonts();
-  fontSmall_.load(ren_, sysFonts, 14);
-  fontUI_.load(ren_, sysFonts, 17);
-  fontBig_.load(ren_, sysFonts, 22);
-  fontTitle_.load(ren_, sysFonts, 28);
-  std::vector<uint8_t> ttfData;
-  if (gd_->read("loose/bluehigh.ttf", ttfData)) {
-    fontHud_.loadFromMemory(ren_, ttfData, 26);
+
+  std::vector<uint8_t> acmeData;
+  if (!gd_->read("loose/acmesai.ttf", acmeData)) {
+    if (!gd_->read("loose/acmesab.ttf", acmeData)) {
+      gd_->read("loose/acmesa.ttf", acmeData);
+    }
+  }
+
+  std::vector<uint8_t> blueData;
+  if (!gd_->read("loose/bluehigh.ttf", blueData)) {
+    if (!gd_->read("loose/bluehigb.ttf", blueData)) {
+      gd_->read("loose/bluehigc.ttf", blueData);
+    }
+  }
+
+  if (!acmeData.empty()) {
+    fontComicSmall_.loadFromMemory(ren_, acmeData, 17);
+    fontComic_.loadFromMemory(ren_, acmeData, 21);
+    fontComicBig_.loadFromMemory(ren_, acmeData, 28);
+    fontSeason_.loadFromMemory(ren_, acmeData, 22);
+    fontTitle_.loadFromMemory(ren_, acmeData, 28);
+    fontBig_.loadFromMemory(ren_, acmeData, 24);
   } else {
+    fontComicSmall_.load(ren_, sysFonts, 17);
+    fontComic_.load(ren_, sysFonts, 21);
+    fontComicBig_.load(ren_, sysFonts, 28);
+    fontSeason_.load(ren_, sysFonts, 22);
+    fontTitle_.load(ren_, sysFonts, 28);
+    fontBig_.load(ren_, sysFonts, 24);
+  }
+
+  if (!blueData.empty()) {
+    fontUI_.loadFromMemory(ren_, blueData, 17);
+    fontSmall_.loadFromMemory(ren_, blueData, 14);
+    fontHud_.loadFromMemory(ren_, blueData, 26);
+  } else {
+    fontUI_.load(ren_, sysFonts, 17);
+    fontSmall_.load(ren_, sysFonts, 14);
     fontHud_.load(ren_, sysFonts, 24);
   }
 
@@ -437,6 +471,46 @@ void GameEngine::saveUserProgress() const {
 void GameEngine::resetUserProgress() {
   progress_.clear();
   saveUserProgress();
+}
+
+bool GameEngine::isLevelUnlocked(int levelIdx) const {
+  if (levelIdx < 0 || levelIdx >= (int)levels_.size()) return false;
+  const std::string name = toLowerAscii(levels_[levelIdx].name);
+  if (name == "tutorial_1" || name == "tutorial_2" || name == "tutorial_3") return true;
+
+  static const std::vector<std::string> season1Levels = {
+      "level_peep", "level_sofa", "level_mail", "level_pie", "level_piano", "level_bath"};
+  for (const auto& s1 : season1Levels) {
+    if (name == s1) return true;
+  }
+
+  // Season 2 & 3 require all 6 Season 1 levels to be completed
+  bool s1Completed = true;
+  for (const auto& s1 : season1Levels) {
+    auto it = progress_.find(s1);
+    if (it == progress_.end() || !it->second.completed) {
+      s1Completed = false;
+      break;
+    }
+  }
+  if (!s1Completed) return false;
+
+  static const std::vector<std::string> season2Levels = {
+      "level_art", "level_suntan", "level_pig", "level_barbecue"};
+  for (const auto& s2 : season2Levels) {
+    if (name == s2) return true;
+  }
+
+  // Season 3 requires Season 2 to be completed as well
+  bool s2Completed = true;
+  for (const auto& s2 : season2Levels) {
+    auto it = progress_.find(s2);
+    if (it == progress_.end() || !it->second.completed) {
+      s2Completed = false;
+      break;
+    }
+  }
+  return s2Completed;
 }
 
 void GameEngine::startLevelWithSplash(int levelIdx) {
@@ -3390,19 +3464,19 @@ void GameEngine::renderMainMenu() {
   drawMenuButton("gfx/gui/main/mainmenu_btn3_hover.tga", "gfx/gui/main/mainmenu_btn3_hover.tga",
                  "gfx/gui/main/mainmenu_btn3_pressed.tga", 248, 286, 333, 54,
                  menuStrings_["mainmenu_start"].empty() ? "Начать игру" : menuStrings_["mainmenu_start"],
-                 fontBig_, cStd, cHov, mp, mouseLeftDown_);
+                 fontComicBig_, cStd, cHov, mp, mouseLeftDown_);
   drawMenuButton("gfx/gui/main/mainmenu_btn2_hover.tga", "gfx/gui/main/mainmenu_btn2_hover.tga",
                  "gfx/gui/main/mainmenu_btn2_pressed.tga", 248, 341, 333, 54,
                  menuStrings_["mainmenu_credits"].empty() ? "Авторы" : menuStrings_["mainmenu_credits"],
-                 fontBig_, cStd, cHov, mp, mouseLeftDown_);
+                 fontComicBig_, cStd, cHov, mp, mouseLeftDown_);
   drawMenuButton("gfx/gui/main/mainmenu_btn2_hover.tga", "gfx/gui/main/mainmenu_btn2_hover.tga",
                  "gfx/gui/main/mainmenu_btn2_pressed.tga", 248, 396, 333, 54,
                  menuStrings_["mainmenu_options"].empty() ? "Настройки" : menuStrings_["mainmenu_options"],
-                 fontBig_, cStd, cHov, mp, mouseLeftDown_);
+                 fontComicBig_, cStd, cHov, mp, mouseLeftDown_);
   drawMenuButton("gfx/gui/main/mainmenu_btn1_hover.tga", "gfx/gui/main/mainmenu_btn1_hover.tga",
                  "gfx/gui/main/mainmenu_btn1_pressed.tga", 248, 451, 333, 54,
                  menuStrings_["mainmenu_quit"].empty() ? "Выход" : menuStrings_["mainmenu_quit"],
-                 fontBig_, cStd, cHov, mp, mouseLeftDown_);
+                 fontComicBig_, cStd, cHov, mp, mouseLeftDown_);
 
   fontSmall_.drawAligned("OpenNFH v0.2.0 (Buka / JoWooD 1.11)", menuRect(12, 570, 770, 24),
                          SDL_Color{230, 230, 230, 220}, -1, 1, menuScale());
@@ -3419,10 +3493,10 @@ void GameEngine::renderBriefingRightPanel(int levelIdx, bool isInGameMenu) {
 
   // Caption ("Описание серии")
   std::string rightCap = menuStrings_["newgamerightcaption"].empty() ? "Описание серии" : menuStrings_["newgamerightcaption"];
-  fontBig_.drawAligned(rightCap, menuRect(400, 0, 375, 50), SDL_Color{255, 255, 255, 255}, 1, 0);
+  fontComicBig_.drawAligned(rightCap, menuRect(400, 0, 375, 50), SDL_Color{255, 255, 255, 255}, 1, 0);
 
   // Episode title
-  fontBig_.drawAligned(bi.title, menuRect(400 + 32, 61, 335, 53), SDL_Color{0, 0, 0, 255}, -1, 0);
+  fontComicBig_.drawAligned(bi.title, menuRect(400 + 32, 61, 335, 53), SDL_Color{0, 0, 0, 255}, -1, 0);
 
   // Level preview image
   drawMenuImage("gfx/gui/main/" + li.name + ".tga", 400 + 28, 121);
@@ -3459,16 +3533,16 @@ void GameEngine::renderBriefingRightPanel(int levelIdx, bool isInGameMenu) {
 
   // Record score for this episode
   const LevelProgress& lp = progress_[toLowerAscii(li.name)];
-  fontUI_.drawAligned(menuStrings_["lastscoretitle"].empty() ? "Рекорд серии:" : menuStrings_["lastscoretitle"],
-                      menuRect(400 + 67, 475, 189, 23), SDL_Color{0, 0, 0, 255}, -1, 0);
-  fontSmall_.drawAligned(menuStrings_["lasttrickscap"].empty() ? "Пакостей" : menuStrings_["lasttrickscap"],
-                         menuRect(400 + 30, 499, 155, 23), SDL_Color{0, 0, 0, 255}, 0, 0);
+  fontComicSmall_.drawAligned(menuStrings_["lastscoretitle"].empty() ? "Рекорд серии:" : menuStrings_["lastscoretitle"],
+                              menuRect(400 + 67, 475, 189, 23), SDL_Color{0, 0, 0, 255}, -1, 0);
+  fontComicSmall_.drawAligned(menuStrings_["lasttrickscap"].empty() ? "Пакостей" : menuStrings_["lasttrickscap"],
+                              menuRect(400 + 30, 499, 155, 23), SDL_Color{0, 0, 0, 255}, 0, 0);
   char trRec[32];
   std::snprintf(trRec, sizeof trRec, "%d / %d", lp.bestTricks, li.reachable);
   fontUI_.drawAligned(trRec, menuRect(400 + 55, 521, 115, 24), SDL_Color{0, 0, 0, 255}, 0, 0);
 
-  fontSmall_.drawAligned(menuStrings_["lastquotacap"].empty() ? "Оценка" : menuStrings_["lastquotacap"],
-                         menuRect(400 + 191, 499, 63, 23), SDL_Color{0, 0, 0, 255}, 0, 0);
+  fontComicSmall_.drawAligned(menuStrings_["lastquotacap"].empty() ? "Оценка" : menuStrings_["lastquotacap"],
+                              menuRect(400 + 191, 499, 63, 23), SDL_Color{0, 0, 0, 255}, 0, 0);
   char qRec[32];
   std::snprintf(qRec, sizeof qRec, "%d %%", lp.bestQuota);
   fontUI_.drawAligned(qRec, menuRect(400 + 191, 521, 63, 24), SDL_Color{0, 0, 0, 255}, 0, 0);
@@ -3476,7 +3550,7 @@ void GameEngine::renderBriefingRightPanel(int levelIdx, bool isInGameMenu) {
   // Play / Continue label & button
   std::string actLabel = isInGameMenu ? (menuStrings_["continuetext"].empty() ? "Назад в игру" : menuStrings_["continuetext"])
                                       : (menuStrings_["play"].empty() ? "Съемка" : menuStrings_["play"]);
-  fontUI_.drawWrapped(actLabel, menuRect(400 + 269, 475, 103, 55), SDL_Color{0, 0, 0, 255}, 0, 0);
+  fontComic_.drawWrapped(actLabel, menuRect(400 + 269, 475, 103, 55), SDL_Color{0, 0, 0, 255}, 0, 0);
   drawMenuButton("gfx/gui/main/start_right_std.tga", "gfx/gui/main/start_right_hover.tga",
                  "gfx/gui/main/start_right_pressed.tga", 400 + 320, 530, 0, 0, "", fontUI_,
                  SDL_Color{}, SDL_Color{}, mp, mouseLeftDown_);
@@ -3487,16 +3561,16 @@ void GameEngine::renderEpisodeSelect() {
   drawMenuImage("gfx/gui/main/newgameleft.tga", 0, 0);
 
   // Header & Season titles
-  fontBig_.drawAligned(menuStrings_["newgamecaption"].empty() ? "Список серий" : menuStrings_["newgamecaption"],
-                       menuRect(75, 0, 350, 50), SDL_Color{255, 255, 255, 255}, -1, 0);
-  fontUI_.drawAligned(menuStrings_["tutseason"].empty() ? "Пилотные серии" : menuStrings_["tutseason"],
-                      menuRect(46, 61, 342, 23), SDL_Color{0, 0, 0, 255}, -1, 0);
-  fontUI_.drawAligned(menuStrings_["season1"].empty() ? "Сезон 1" : menuStrings_["season1"],
-                      menuRect(46, 160, 342, 23), SDL_Color{0, 0, 0, 255}, -1, 0);
-  fontUI_.drawAligned(menuStrings_["season2"].empty() ? "Сезон 2" : menuStrings_["season2"],
-                      menuRect(46, 323, 342, 23), SDL_Color{0, 0, 0, 255}, -1, 0);
-  fontUI_.drawAligned(menuStrings_["season3"].empty() ? "Сезон 3" : menuStrings_["season3"],
-                      menuRect(46, 422, 342, 23), SDL_Color{0, 0, 0, 255}, -1, 0);
+  fontComicBig_.drawAligned(menuStrings_["newgamecaption"].empty() ? "Список серий" : menuStrings_["newgamecaption"],
+                            menuRect(75, 0, 350, 50), SDL_Color{255, 255, 255, 255}, -1, 0);
+  fontSeason_.drawAligned(menuStrings_["tutseason"].empty() ? "Пилотные серии" : menuStrings_["tutseason"],
+                          menuRect(55, 60, 320, 26), SDL_Color{0, 0, 0, 255}, -1, 0);
+  fontSeason_.drawAligned(menuStrings_["season1"].empty() ? "Сезон 1" : menuStrings_["season1"],
+                          menuRect(55, 159, 320, 26), SDL_Color{0, 0, 0, 255}, -1, 0);
+  fontSeason_.drawAligned(menuStrings_["season2"].empty() ? "Сезон 2" : menuStrings_["season2"],
+                          menuRect(55, 322, 320, 26), SDL_Color{0, 0, 0, 255}, -1, 0);
+  fontSeason_.drawAligned(menuStrings_["season3"].empty() ? "Сезон 3" : menuStrings_["season3"],
+                          menuRect(55, 421, 320, 26), SDL_Color{0, 0, 0, 255}, -1, 0);
 
   auto isSeasonCompleted = [&](const std::initializer_list<const char*>& levelNames) {
     for (const char* name : levelNames) {
@@ -3522,6 +3596,13 @@ void GameEngine::renderEpisodeSelect() {
     const LevelInfo& li = levels_[i];
     const BriefingInfo& bi = briefings_[i];
     const LevelProgress& lp = progress_[toLowerAscii(li.name)];
+
+    bool unlocked = isLevelUnlocked((int)i);
+    if (!unlocked) {
+      drawMenuImage("gfx/gui/main/button_dis_normal.tga", bi.menuX, bi.menuY);
+      continue;
+    }
+
     std::string stateTag = lp.perfect ? "perfect" : (lp.completed ? "passed" : "normal");
     std::string base = "gfx/gui/main/button_" + bi.buttonShortName + "_" + stateTag;
     std::string stdImg = base + ".tga";
@@ -3547,8 +3628,8 @@ void GameEngine::renderEpisodeSelect() {
   }
 
   // Back to main menu button
-  fontUI_.drawAligned(menuStrings_["canceltext"].empty() ? "Вернуться в главное меню" : menuStrings_["canceltext"],
-                      menuRect(90, 521, 282, 25), SDL_Color{0, 0, 0, 255}, -1, 0);
+  fontComic_.drawAligned(menuStrings_["canceltext"].empty() ? "Вернуться в главное меню" : menuStrings_["canceltext"],
+                         menuRect(90, 521, 282, 25), SDL_Color{0, 0, 0, 255}, -1, 0);
   drawMenuButton("gfx/gui/main/exit_std.tga", "gfx/gui/main/exit_hover.tga", "gfx/gui/main/exit_pressed.tga",
                  25, 530, 0, 0, "", fontUI_, SDL_Color{}, SDL_Color{}, mp, mouseLeftDown_);
 
@@ -3887,7 +3968,7 @@ void GameEngine::renderConfirmModal() {
   int lowY = by + 160;
   drawMenuImage("gfx/gui/ingame/messagebox_low2.tga", bx, lowY);
 
-  fontUI_.drawWrapped(confirmText_, menuRect(bx + 35, by + 75, 370, 75), SDL_Color{255, 255, 255, 255}, 0, 0);
+  fontComic_.drawWrapped(confirmText_, menuRect(bx + 35, by + 75, 370, 75), SDL_Color{255, 255, 255, 255}, 0, 0);
 
   bool hovYes = Rect{bx + 13, lowY + 18, 52, 42}.contains(mp.x, mp.y);
   bool hovNo = Rect{bx + 375, lowY + 18, 52, 42}.contains(mp.x, mp.y);
@@ -3949,6 +4030,10 @@ void GameEngine::onMenuClick(Point mp, bool doubleClick) {
       for (size_t i = 0; i < briefings_.size(); ++i) {
         const BriefingInfo& bi = briefings_[i];
         if (Rect{bi.menuX, bi.menuY, 75, 60}.contains(mp.x, mp.y)) {
+          if (!isLevelUnlocked((int)i)) {
+            // Locked level: cannot select or play
+            return;
+          }
           playSfx("sfx/but1.wav");
           previewLevelIdx_ = (int)i;
           if (doubleClick) {
@@ -3965,6 +4050,7 @@ void GameEngine::onMenuClick(Point mp, bool doubleClick) {
       }
       // Start Episode button ("Съемка")
       if (Rect{400 + 270, 480, 110, 95}.contains(mp.x, mp.y)) {
+        if (!isLevelUnlocked(previewLevelIdx_)) return;
         playSfx("sfx/but1.wav");
         startLevelWithSplash(previewLevelIdx_);
         return;

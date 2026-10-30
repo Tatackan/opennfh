@@ -197,6 +197,7 @@ class GameEngine {
   void render();
   void renderWorld();
   void renderObject(const PlacedObject& po);
+  bool isLevelUnlocked(int levelIdx) const;
   void renderActor(const ActorState& a);
   void renderHud();
   void renderMainMenu();
@@ -269,6 +270,7 @@ class GameEngine {
   std::vector<std::pair<std::string, bool>> creditsLines_;  // (text, isHeader)
 
   TextRenderer fontUI_, fontBig_, fontHud_, fontSmall_, fontTitle_;
+  TextRenderer fontComic_, fontComicBig_, fontComicSmall_, fontSeason_;
   std::unique_ptr<GameData> gd_;
   std::vector<LevelInfo> levels_;
   std::vector<BriefingInfo> briefings_;
