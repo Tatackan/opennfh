@@ -126,6 +126,7 @@ class GameEngine {
     TrickDef trick;
     std::string transformObjectTo;
     bool hideObjectOnFinish = false;
+    bool isExitLevel = false;
   };
 
   struct RoutineStop {
@@ -229,7 +230,7 @@ class GameEngine {
   std::string currentMusicVpath_;
 
   // Confirmation modal state
-  enum class ConfirmAction { None, QuitGame, ResetProgress, AbortEpisode, RestartEpisode };
+  enum class ConfirmAction { None, QuitGame, ResetProgress, AbortEpisode, RestartEpisode, ExitEpisode };
   ConfirmAction confirmAction_ = ConfirmAction::None;
   std::string confirmText_;
 
@@ -324,6 +325,8 @@ class GameEngine {
   int hoveredObject_ = -1;
   std::string hoveredRoom_;
   std::string hoverText_;
+  int hoveredInvSlot_ = -1;
+  int hoveredInvTicks_ = 0;
   std::string cursorVpath_ = "gfx/cursor/normal.tga";
 };
 

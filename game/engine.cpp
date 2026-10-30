@@ -118,6 +118,11 @@ bool GameEngine::init(const GameOptions& opts) {
   loadUserProgress();
   applyAudioVolumes();
 
+  if (fullscreen_) {
+    SDL_SetWindowFullscreen(window_, SDL_WINDOW_FULLSCREEN_DESKTOP);
+    SDL_GetRendererOutputSize(ren_, &winW_, &winH_);
+  }
+
   int startIdx = 0;
   for (size_t i = 0; i < levels_.size(); ++i) {
     if (toLowerAscii(levels_[i].name) == toLowerAscii(opts.levelName)) {
@@ -371,6 +376,7 @@ void GameEngine::loadUserProgress() {
     else if (k == "timeLimit") optTimeLimit_ = (v == "1");
     else if (k == "autoScroll") optAutoScroll_ = (v == "1");
     else if (k == "coloredCursor") optColoredCursor_ = (v == "1");
+    else if (k == "fullscreen") fullscreen_ = (v == "1");
     else if (k.rfind("level.", 0) == 0) {
       std::string lv = toLowerAscii(k.substr(6));
       size_t comma = v.find(',');
@@ -397,6 +403,7 @@ void GameEngine::saveUserProgress() const {
   oss << "timeLimit=" << (optTimeLimit_ ? 1 : 0) << "\n";
   oss << "autoScroll=" << (optAutoScroll_ ? 1 : 0) << "\n";
   oss << "coloredCursor=" << (optColoredCursor_ ? 1 : 0) << "\n";
+  oss << "fullscreen=" << (fullscreen_ ? 1 : 0) << "\n";
   for (const auto& kv : progress_) {
     oss << "level." << kv.first << "=" << std::clamp(kv.second.bestQuota, 0, 100) << "," << kv.second.bestTricks << "\n";
   }
@@ -500,13 +507,21 @@ bool GameEngine::selectLevel(int index) {
       woody_.room = sp.room;
       woody_.pos = sp.position;
       woody_.layer = sp.layer;
-      if (toLowerAscii(woody_.room) == "fro" && woody_.pos.x > 140) {
-        woody_.pos.x = 190;
+      if (toLowerAscii(woody_.room) == "fro") {
+        woody_.pos.x = 320;
         TaskStep introWalk{};
         introWalk.type = TaskStep::Type::WalkToX;
-        introWalk.targetX = 105;
+        introWalk.targetX = 140;
         introWalk.sneak = false;
         woodyQueue_.push_back(introWalk);
+
+        TaskStep introAnim{};
+        introAnim.type = TaskStep::Type::PlayAction;
+        introAnim.actorAnim = "smile";
+        introAnim.actorNextAnim = "ms2";
+        introAnim.durationTicks = 13;
+        introAnim.nonInterruptible = true;
+        woodyQueue_.push_back(introAnim);
       }
     } else if (toLowerAscii(sp.name) == "neighbor") {
       neighbor_.room = sp.room;
@@ -821,20 +836,51 @@ void GameEngine::updateHover(int worldX, int worldY, int screenX, int screenY) {
     if (missionBtn.contains(hx, hy)) {
       hoverText_ = "Игровое меню (Esc)";
       cursorVpath_ = "gfx/cursor/use.tga";
+      hoveredInvSlot_ = -1;
+      hoveredInvTicks_ = 0;
       return;
     }
+    int curSlot = -1;
     for (int slot = 0; slot < 5; ++slot) {
       int idx = invScroll_ + slot;
       if (idx >= (int)inventory_.size()) break;
       Rect r{123 + 41 + slot * 75, 511 + 26, 60, 55};
       if (r.contains(hx, hy)) {
+        curSlot = slot;
         std::string itemName = level_.getString(inventory_[idx], "name");
         hoverText_ = itemName.empty() ? inventory_[idx] : itemName;
         cursorVpath_ = "gfx/cursor/use.tga";
-        return;
+        break;
       }
     }
+    if (curSlot >= 0) {
+      if (hoveredInvSlot_ == curSlot) {
+        hoveredInvTicks_++;
+      } else {
+        hoveredInvSlot_ = curSlot;
+        hoveredInvTicks_ = 0;
+      }
+    } else {
+      hoveredInvSlot_ = -1;
+      hoveredInvTicks_ = 0;
+    }
     return;
+  }
+  hoveredInvSlot_ = -1;
+  hoveredInvTicks_ = 0;
+
+  // Exit door in front hallway (fro)
+  if (const RoomDef* froRoom = level_.findRoom("fro")) {
+    int rx = worldX - froRoom->offset.x;
+    int ry = worldY - froRoom->offset.y;
+    if (rx >= 280 && rx <= 440 && ry >= 60 && ry <= 260) {
+      hoveredObject_ = -2;
+      hoveredRoom_ = "fro";
+      std::string endStr = level_.getString("end", "string");
+      hoverText_ = (endStr.empty() ? "Выйти через" : endStr) + " входную дверь";
+      cursorVpath_ = "gfx/cursor/use.tga";
+      return;
+    }
   }
 
   const std::string heldItem = (selectedInv_ >= 0 && selectedInv_ < (int)inventory_.size()) ? inventory_[selectedInv_] : std::string();
@@ -1027,7 +1073,7 @@ void GameEngine::queuePathToRoom(const std::string& destRoom, bool sneak) {
 }
 
 void GameEngine::onLeftClick(int worldX, int worldY, int screenX, int screenY, bool doubleClick) {
-  if (catchSequenceActive_) return;
+  if (catchSequenceActive_ || neighborChasing_) return;
 
   // Check HUD clicks first
   const float hudScale = std::min(float(winW_) / 800.0f, float(winH_) / 480.0f);
@@ -1042,17 +1088,19 @@ void GameEngine::onLeftClick(int worldX, int worldY, int screenX, int screenY, b
       enterScreen(ScreenState::PauseMenu);
       return;
     }
-    Rect leftArr{123, 547, 36, 36};
-    Rect rightArr{123 + 422, 547, 36, 36};
-    if (leftArr.contains(hx, hy)) {
-      if (invScroll_ > 0) invScroll_--;
-      playSfx("sfx/but1.wav");
-      return;
-    }
-    if (rightArr.contains(hx, hy)) {
-      if (invScroll_ + 5 < (int)inventory_.size()) invScroll_++;
-      playSfx("sfx/but1.wav");
-      return;
+    if (inventory_.size() > 5) {
+      Rect leftArr{123, 547, 36, 36};
+      Rect rightArr{123 + 422, 547, 36, 36};
+      if (leftArr.contains(hx, hy)) {
+        if (invScroll_ > 0) invScroll_--;
+        playSfx("sfx/but1.wav");
+        return;
+      }
+      if (rightArr.contains(hx, hy)) {
+        if (invScroll_ + 5 < (int)inventory_.size()) invScroll_++;
+        playSfx("sfx/but1.wav");
+        return;
+      }
     }
     if (hy >= 530) {
       for (int slot = 0; slot < 5; ++slot) {
@@ -1148,13 +1196,47 @@ void GameEngine::onLeftClick(int worldX, int worldY, int screenX, int screenY, b
     return p;
   };
 
+  if (hoveredObject_ == -2) {
+    selectedInv_ = -1;
+    Point curPos = currentWoodyEndPos();
+    std::string curRoom = woody_.room;
+    for (const TaskStep& st : woodyQueue_) {
+      if (st.type == TaskStep::Type::TraverseDoor) curRoom = st.targetRoom;
+    }
+    enqueueRoomWalk(woodyQueue_, curRoom, curPos, Point{330, 218}, false);
+    TaskStep exitStep{};
+    exitStep.type = TaskStep::Type::PlayAction;
+    exitStep.actorAnim = "ms2";
+    exitStep.actorNextAnim = "ms2";
+    exitStep.durationTicks = 2;
+    exitStep.nonInterruptible = true;
+    exitStep.isExitLevel = true;
+    woodyQueue_.push_back(exitStep);
+    return;
+  }
+
   if (hoveredObject_ >= 0) {
     const PlacedObject& po = level_.objects[hoveredObject_];
     const ObjectDef* od = level_.findObjectDef(po.name);
 
-    // Exit door (hal/door_entrance) when minimum quota has been reached finishes the episode!
-    if (od && toLowerAscii(od->stdAction) == "end" && quota_ >= level_.info.minQuota) {
-      finishEpisode(false, false);
+    // Exit door: walk up and open exit confirmation dialog
+    if (od && toLowerAscii(od->stdAction) == "end") {
+      selectedInv_ = -1;
+      Point curPos = currentWoodyEndPos();
+      std::string curRoom = woody_.room;
+      for (const TaskStep& st : woodyQueue_) {
+        if (st.type == TaskStep::Type::TraverseDoor) curRoom = st.targetRoom;
+      }
+      Point hs = od->hotspotOr("woody", Point{po.position.x, 218});
+      enqueueRoomWalk(woodyQueue_, curRoom, curPos, hs, false);
+      TaskStep exitStep{};
+      exitStep.type = TaskStep::Type::PlayAction;
+      exitStep.actorAnim = "ms2";
+      exitStep.actorNextAnim = "ms2";
+      exitStep.durationTicks = 2;
+      exitStep.nonInterruptible = true;
+      exitStep.isExitLevel = true;
+      woodyQueue_.push_back(exitStep);
       return;
     }
 
@@ -1530,6 +1612,13 @@ void GameEngine::updateWoody() {
             woody_.currentAnim = step.actorNextAnim.empty() ? "ms2" : step.actorNextAnim;
             woody_.nextAnim = woody_.currentAnim;
             woody_.animFrame = 0;
+          }
+          if (step.isExitLevel) {
+            confirmAction_ = ConfirmAction::ExitEpisode;
+            confirmText_ = level_.getString("exitlevel", "content");
+            if (confirmText_.empty()) confirmText_ = "Вы действительно готовы завершить серию?";
+            woodyQueue_.pop_front();
+            return;
           }
           woodyQueue_.pop_front();
           continue;
@@ -2662,40 +2751,16 @@ void GameEngine::checkStealthDetection() {
       neighborChasing_ = false;
       neighborAlertTicks_ = 0;
       catchesCount_++;
-      if (catchesCount_ >= 3) {
-        finishEpisode(false, true);
-        return;
-      }
-      woody_.room = "fro";
-      woody_.pos = Point{105, 218};
-      woody_.hidden = false;
-      woody_.hidingInObject = -1;
-      woody_.currentAnim = "ms2";
-      woody_.nextAnim = "ms2";
-      woody_.animFrame = 0;
-      woodyQueue_.clear();
-      for (PlacedObject& po : level_.objects) {
-        if (po.isDoor && (po.currentAnim == "woody_enter" || po.currentAnim == "woody_leave")) {
-          po.currentAnim = "ms";
-          po.nextAnim = "ms";
-          po.animFrame = 0;
-        }
-        if (po.currentAnim.rfind("woody_", 0) == 0 || po.currentAnim == "decline") {
-          po.currentAnim = "ms";
-          po.nextAnim = "ms";
-          po.animFrame = 0;
-        }
-      }
-      neighbor_.currentAnim = "ms2";
-      neighbor_.nextAnim = "ms2";
-      neighbor_.animFrame = 0;
-      neighborWaitTicks_ = 12;
+      finishEpisode(false, true);
+      return;
     }
     return;
   }
 
-  bool woodyTrulyHidden = (woody_.hidden && woody_.hidingInObject >= 0);
-  if (woodyTrulyHidden || neighbor_.hidden || toLowerAscii(woody_.room) != toLowerAscii(neighbor_.room)) {
+  bool woodyInTransition = woody_.hidden ||
+      (!woodyQueue_.empty() && (woodyQueue_.front().type == TaskStep::Type::TraverseDoor ||
+                                woodyQueue_.front().enterHideout || woodyQueue_.front().leaveHideout));
+  if (woodyInTransition || neighbor_.hidden || toLowerAscii(woody_.room) != toLowerAscii(neighbor_.room)) {
     if (neighborChasing_) {
       neighborChasing_ = false;
       neighborAlertTicks_ = 0;
@@ -2725,7 +2790,7 @@ void GameEngine::checkStealthDetection() {
     playSfx("sfx/wod_fear1.wav");
     playSfx("sfx/na_beats1.wav");
     playSfx("sfx/wod_au1.wav");
-    statusBanner_ = "СОСЕД ПОЙМАЛ ВУДИ! (" + std::to_string(catchesCount_ + 1) + "/3)";
+    statusBanner_ = "СОСЕД ПОЙМАЛ ВУДИ!";
     bannerTicks_ = kTicksPerSecond * 3;
 
     for (PlacedObject& po : level_.objects) {
@@ -2752,11 +2817,19 @@ void GameEngine::checkStealthDetection() {
       playSfx("sfx/wod_fear1.wav");
       statusBanner_ = "СОСЕД ЗАМЕТИЛ ВАС!";
       bannerTicks_ = kTicksPerSecond * 2;
-      if (!woodyQueue_.empty() && woodyQueue_.front().type != TaskStep::Type::TraverseDoor) {
-        woodyQueue_.clear();
-        woodyActionTicks_ = woodyActionTotalTicks_ = 0;
-      }
+      woodyQueue_.clear();
+      woodyActionTicks_ = woodyActionTotalTicks_ = 0;
+      woodyBusyInAnim_ = true;
+      int fearFacing = (neighbor_.pos.x > woody_.pos.x) ? 1 : 3;
+      woody_.facing = fearFacing;
+      woody_.currentAnim = (fearFacing == 1) ? "fear1" : "fear3";
+      woody_.nextAnim = (fearFacing == 1) ? "fear1_loop" : "fear3_loop";
+      woody_.animFrame = 0;
     }
+
+    cursorVpath_ = "gfx/cursor/camera.tga";
+    woodyBusyInAnim_ = true;
+    advanceActorAnim(woody_);
 
     if (neighborAlertTicks_ > 0) {
       neighborAlertTicks_--;
@@ -2781,7 +2854,7 @@ void GameEngine::tickSimulation() {
     return;
   }
 
-  if (screen_ != ScreenState::InGame || paused_) return;
+  if (screen_ != ScreenState::InGame || paused_ || confirmAction_ != ConfirmAction::None) return;
   if (bannerTicks_ > 0) bannerTicks_--;
   if (angerTicks_ > 0) angerTicks_--;
   if (optTimeLimit_ && level_.info.timeTicks > 0) {
@@ -2967,7 +3040,7 @@ void GameEngine::renderWorld() {
     float zy = float(availH) / float(level_.size.y);
     camZoom_ = std::min(zx, zy);
     camX_ = (winW_ - level_.size.x * camZoom_) * 0.5f;
-    camY_ = (availH - level_.size.y * camZoom_) * 0.5f;
+    camY_ = float(availH) - level_.size.y * camZoom_;
   } else {
     camZoom_ = std::max(1.0f, float(winW_) / 950.0f);
     if (!camDragging_) {
@@ -2977,10 +3050,10 @@ void GameEngine::renderWorld() {
 
         // Edge scrolling when mouse cursor approaches window edges
         const int edgeMargin = 50;
-        const float scrollSpeed = 16.0f;
+        const float scrollSpeed = 26.0f;
         bool edgeScrolling = false;
         if (screen_ == ScreenState::InGame && confirmAction_ == ConfirmAction::None) {
-          if (mouseX_ >= 0 && mouseX_ <= winW_ && mouseY_ >= 0 && mouseY_ <= availH) {
+          if (mouseX_ >= 0 && mouseX_ <= winW_ && mouseY_ >= 0 && mouseY_ <= winH_) {
             if (mouseX_ < edgeMargin) {
               camEdgeOffsetX_ += scrollSpeed;
               edgeScrolling = true;
@@ -2991,7 +3064,7 @@ void GameEngine::renderWorld() {
             if (mouseY_ < edgeMargin) {
               camEdgeOffsetY_ += scrollSpeed;
               edgeScrolling = true;
-            } else if (mouseY_ > availH - edgeMargin) {
+            } else if (mouseY_ > winH_ - edgeMargin || mouseY_ > availH - edgeMargin) {
               camEdgeOffsetY_ -= scrollSpeed;
               edgeScrolling = true;
             }
@@ -3024,7 +3097,7 @@ void GameEngine::renderWorld() {
       camX_ = std::clamp(camX_, float(winW_) - houseW, 0.0f);
     }
     if (houseH <= float(availH)) {
-      camY_ = (float(availH) - houseH) * 0.5f;
+      camY_ = float(availH) - houseH;
     } else {
       camY_ = std::clamp(camY_, float(availH) - houseH, 0.0f);
     }
@@ -3115,8 +3188,10 @@ void GameEngine::renderHud() {
   // Center: tooltip bar + 5 inventory slots
   drawGui("gfx/gui/ingame/interface_center_top.tga", 123, 506);
   drawGui("gfx/gui/ingame/interface_center.tga", 123, 511);
-  drawGui("gfx/gui/ingame/scroll_left_std.tga", 123, 547);
-  drawGui("gfx/gui/ingame/scroll_right_std.tga", 123 + 422, 547);
+  if (inventory_.size() > 5) {
+    drawGui("gfx/gui/ingame/scroll_left_std.tga", 123, 547);
+    drawGui("gfx/gui/ingame/scroll_right_std.tga", 123 + 422, 547);
+  }
 
   if (!hoverText_.empty()) {
     fontUI_.drawScaled(hoverText_, hudX + 135.0f * hudScale, hudY + 513.0f * hudScale, hudScale, SDL_Color{255, 255, 255, 255});
@@ -3139,6 +3214,57 @@ void GameEngine::renderHud() {
         SDL_FRect dst{sx, sy, float(t->w) * hudScale, float(t->h) * hudScale};
         SDL_RenderCopyF(ren_, t->tex, nullptr, &dst);
       }
+    }
+  }
+
+  // Comic thought bubble on 1 second hover over inventory item
+  if (hoveredInvSlot_ >= 0 && hoveredInvSlot_ < 5 && hoveredInvTicks_ >= 12) {
+    int hIdx = invScroll_ + hoveredInvSlot_;
+    if (hIdx >= 0 && hIdx < (int)inventory_.size()) {
+      const std::string& itemKey = inventory_[hIdx];
+      std::string desc = level_.getString(itemKey, "description");
+      if (desc.empty()) desc = level_.getString(itemKey, "string");
+      if (desc.empty()) desc = level_.getString(itemKey, "name");
+      if (desc.empty()) desc = itemKey;
+
+      float sx = hudX + (123.0f + 41.0f + hoveredInvSlot_ * 75.0f) * hudScale;
+      float sy = hudY + (511.0f + 26.0f) * hudScale;
+
+      int charsPerLine = std::max(16, int(22 * hudScale));
+      int lineCount = std::max(1, (int(desc.size()) + charsPerLine - 1) / charsPerLine);
+      float textH = std::clamp(float(lineCount * 18) * hudScale, 20.0f * hudScale, 90.0f * hudScale);
+
+      float bW = 200.0f * hudScale;
+      float slotCenterX = sx + 30.0f * hudScale;
+      float bX = std::clamp(slotCenterX - bW * 0.5f, 10.0f, float(winW_) - bW - 10.0f);
+      float totalH = (21.0f + 21.0f + 24.0f) * hudScale + textH;
+      float bY = sy - totalH - 2.0f * hudScale;
+
+      const TexEntry* tTop = getTexture("gfx/gui/ingame/textbubble_top.tga");
+      const TexEntry* tMid = getTexture("gfx/gui/ingame/textbubble_center.tga");
+      const TexEntry* tBot = getTexture("gfx/gui/ingame/textbubble_bottom.tga");
+      const TexEntry* tSpitz = getTexture("gfx/gui/ingame/textbubble_spitz.tga");
+
+      if (tTop) {
+        SDL_FRect rTop{bX, bY, bW, 21.0f * hudScale};
+        SDL_RenderCopyF(ren_, tTop->tex, nullptr, &rTop);
+      }
+      if (tMid) {
+        SDL_FRect rMid{bX, bY + 21.0f * hudScale, bW, textH};
+        SDL_RenderCopyF(ren_, tMid->tex, nullptr, &rMid);
+      }
+      if (tBot) {
+        SDL_FRect rBot{bX, bY + 21.0f * hudScale + textH, bW, 21.0f * hudScale};
+        SDL_RenderCopyF(ren_, tBot->tex, nullptr, &rBot);
+      }
+      if (tSpitz) {
+        SDL_FRect rSpitz{bX, bY + (21.0f + 21.0f) * hudScale + textH, bW, 24.0f * hudScale};
+        SDL_RenderCopyF(ren_, tSpitz->tex, nullptr, &rSpitz);
+      }
+
+      SDL_Rect textRect{int(bX + 16.0f * hudScale), int(bY + 14.0f * hudScale),
+                        int(bW - 32.0f * hudScale), int(textH + 14.0f * hudScale)};
+      fontSmall_.drawWrapped(desc, textRect, SDL_Color{20, 20, 20, 255}, 0, 0);
     }
   }
 
@@ -3604,7 +3730,27 @@ void GameEngine::renderConfirmModal() {
   int bx = 180, by = 170;
 
   drawMenuImage("gfx/gui/ingame/messagebox_top.tga", bx, by);
-  drawMenuImage("gfx/gui/ingame/mb_head_01.tga", bx + 172, by);
+  static const char* kJoeFrames[] = {
+      "gfx/gui/ingame/mb_head_02.tga", "gfx/gui/ingame/mb_head_03.tga",
+      "gfx/gui/ingame/mb_head_04.tga", "gfx/gui/ingame/mb_head_05.tga",
+      "gfx/gui/ingame/mb_head_06.tga", "gfx/gui/ingame/mb_head_07.tga",
+      "gfx/gui/ingame/mb_head_08.tga", "gfx/gui/ingame/mb_head_09.tga",
+      "gfx/gui/ingame/mb_head_10.tga", "gfx/gui/ingame/mb_head_09.tga",
+      "gfx/gui/ingame/mb_head_08.tga", "gfx/gui/ingame/mb_head_07.tga",
+      "gfx/gui/ingame/mb_head_06.tga", "gfx/gui/ingame/mb_head_05.tga",
+      "gfx/gui/ingame/mb_head_04.tga", "gfx/gui/ingame/mb_head_03.tga",
+      "gfx/gui/ingame/mb_head_02.tga",
+      "gfx/gui/ingame/mb_head_01.tga", "gfx/gui/ingame/mb_head_01.tga",
+      "gfx/gui/ingame/mb_head_01.tga", "gfx/gui/ingame/mb_head_01.tga",
+      "gfx/gui/ingame/mb_head_01.tga", "gfx/gui/ingame/mb_head_01.tga",
+      "gfx/gui/ingame/mb_head_00.tga", "gfx/gui/ingame/mb_head_01.tga",
+      "gfx/gui/ingame/mb_head_01.tga", "gfx/gui/ingame/mb_head_00.tga",
+      "gfx/gui/ingame/mb_head_01.tga", "gfx/gui/ingame/mb_head_01.tga",
+      "gfx/gui/ingame/mb_head_01.tga", "gfx/gui/ingame/mb_head_01.tga",
+      "gfx/gui/ingame/mb_head_01.tga", "gfx/gui/ingame/mb_head_01.tga",
+  };
+  int frameIdx = (SDL_GetTicks() / 80) % (int)std::size(kJoeFrames);
+  drawMenuImage(kJoeFrames[frameIdx], bx + 172, by);
   for (int i = 0; i < 3; ++i) {
     drawMenuImage("gfx/gui/ingame/messagebox_mid.tga", bx, by + 100 + i * 20);
   }
@@ -3637,6 +3783,8 @@ void GameEngine::onMenuClick(Point mp, bool doubleClick) {
       else if (act == ConfirmAction::RestartEpisode) {
         selectLevel(currentLevelIdx_);
         enterScreen(ScreenState::InGame);
+      } else if (act == ConfirmAction::ExitEpisode) {
+        finishEpisode(false, false);
       }
       return;
     }
@@ -3807,6 +3955,7 @@ void GameEngine::toggleFullscreen() {
   fullscreen_ = !fullscreen_;
   SDL_SetWindowFullscreen(window_, fullscreen_ ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0);
   SDL_GetRendererOutputSize(ren_, &winW_, &winH_);
+  saveUserProgress();
 }
 
 void GameEngine::renderCursor() {
