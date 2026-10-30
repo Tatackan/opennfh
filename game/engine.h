@@ -194,7 +194,7 @@ class GameEngine {
   void onRightClick(int worldX, int worldY, int screenX, int screenY);
   void onMenuClick(Point mp, bool doubleClick);
   void queuePathToRoom(const std::string& destRoom, bool sneak);
-  void queueNeighborToRoom(const std::string& destRoom, Point destPos = Point{-1, -1});
+  void queueNeighborToRoom(const std::string& destRoom, Point destPos = Point{-1, -1}, bool fast = false);
   const CombinationDef* findCombination(const std::string& targetName, const std::string& itemName) const;
   void toggleFullscreen();
   float getHudScale() const;
@@ -205,6 +205,7 @@ class GameEngine {
   void renderObject(const PlacedObject& po);
   bool isLevelUnlocked(int levelIdx) const;
   void renderActor(const ActorState& a);
+  void renderWoodyProgressBar();
   void renderHud();
   void renderMainMenu();
   void renderEpisodeSelect();
@@ -328,6 +329,7 @@ class GameEngine {
   int catchesCount_ = 0;
   bool neighborChasing_ = false;
   int neighborAlertTicks_ = 0;
+  bool neighborHasLaxativeBeer_ = false;
 
   // Inventory & score
   std::vector<std::string> inventory_;

@@ -233,6 +233,66 @@ bool GameEngine::init(const GameOptions& opts) {
     enterScreen(ScreenState::InGame);
     woodyActionTotalTicks_ = 100;
     woodyActionTicks_ = 27;
+  } else if (scr == "test_sofa_saw") {
+    enterScreen(ScreenState::InGame);
+    woody_.room = "lir";
+    woody_.pos = Point{425, 415};
+    neighbor_.room = "kit";
+    neighbor_.pos = Point{350, 410};
+    int sofaIdx = findObjectIndex("lir/sofa", "lir");
+    if (sofaIdx >= 0) {
+      PlacedObject& so = level_.objects[sofaIdx];
+      so.currentAnim = "woody_saw";
+      so.animFrame = 20;
+      woody_.hidden = true;
+      woody_.currentAnim = "inv";
+      woodyActionTotalTicks_ = 180;
+      woodyActionTicks_ = 108;
+      TaskStep st{};
+      st.type = TaskStep::Type::PlayAction;
+      st.objectIndex = sofaIdx;
+      st.actorAnim = "inv";
+      st.objAnim = "woody_saw";
+      st.durationTicks = 180;
+      st.elapsedTicks = 72;
+      st.showProgressBar = true;
+      woodyQueue_.push_back(st);
+    }
+  } else if (scr == "test_woody_fear") {
+    enterScreen(ScreenState::InGame);
+    woody_.room = "lir";
+    woody_.pos = Point{400, 420};
+    woody_.facing = 1;
+    woody_.currentAnim = "fear1_loop";
+    woody_.nextAnim = "fear1_loop";
+    woody_.animFrame = 1;
+    neighbor_.room = "lir";
+    neighbor_.pos = Point{620, 420};
+    neighbor_.facing = 3;
+    neighbor_.currentAnim = "mr3";
+    neighborChasing_ = true;
+    neighborAlertTicks_ = 0;
+  } else if (scr == "test_sofa_beer") {
+    enterScreen(ScreenState::InGame);
+    neighbor_.room = "lir";
+    int sofaIdx = findObjectIndex("lir/sofa", "lir");
+    if (sofaIdx >= 0) {
+      PlacedObject& so = level_.objects[sofaIdx];
+      so.currentAnim = "neighbor_sit_beer";
+      so.animFrame = 12;
+      neighbor_.hidden = true;
+      neighbor_.currentAnim = "inv";
+    }
+  } else if (scr == "test_toilet_empty") {
+    enterScreen(ScreenState::InGame);
+    woody_.room = "toi";
+    woody_.pos = Point{450, 420};
+    int paperIdx = findObjectIndex("toi/paperbracket", "toi");
+    if (paperIdx >= 0) {
+      PlacedObject& po = level_.objects[paperIdx];
+      po.items.clear();
+      po.currentAnim = "empty";
+    }
   } else if (!opts.screenshot.empty() || !opts.recordDir.empty()) {
     enterScreen(ScreenState::InGame);
   } else if (opts.startInLevel) {
@@ -615,6 +675,7 @@ bool GameEngine::selectLevel(int index) {
   catchesCount_ = 0;
   neighborChasing_ = false;
   neighborAlertTicks_ = 0;
+  neighborHasLaxativeBeer_ = false;
   camInitialized_ = false;
   pets_.clear();
   interruptedRoutineIdx_ = -1;
@@ -813,6 +874,7 @@ void GameEngine::buildNeighborRoutine() {
       stop.trickObj = "lir/phono_nail";
     }
     stop.onlyWhenTricked = !hasNormalNeighborAct;
+    if (lowerPo == "toi/toilet" || lowerPo == "toilet") stop.onlyWhenTricked = true;
 
     size_t slash = po.name.find('/');
     std::string shortRaw = toLowerAscii(slash == std::string::npos ? po.name : po.name.substr(slash + 1));
@@ -1046,7 +1108,10 @@ void GameEngine::updateHover(int worldX, int worldY, int screenX, int screenY) {
   int bestLayer = -1;
   for (int i = (int)level_.objects.size() - 1; i >= 0; --i) {
     const PlacedObject& po = level_.objects[i];
-    if (!po.visible || po.currentAnim == "inv" || toLowerAscii(po.currentAnim) == "empty" || toLowerAscii(po.name) == "house") continue;
+    const ObjectDef* od = level_.findObjectDef(po.name);
+    bool isInteractiveEmptyContainer = (od && od->hasFlag("container") && od->findAction("open", "woody") != nullptr && po.name != "bal/cactus");
+    if (!po.visible || po.currentAnim == "inv" || toLowerAscii(po.name) == "house") continue;
+    if (toLowerAscii(po.currentAnim) == "empty" && !isInteractiveEmptyContainer) continue;
     Rect hb = objectWorldHitbox(po);
     if (hb.contains(worldX, worldY) && po.layer >= bestLayer) {
       bestLayer = po.layer;
@@ -1237,7 +1302,7 @@ void GameEngine::queuePathToRoom(const std::string& destRoom, bool sneak) {
   }
 }
 
-void GameEngine::queueNeighborToRoom(const std::string& destRoom, Point destPos) {
+void GameEngine::queueNeighborToRoom(const std::string& destRoom, Point destPos, bool fast) {
   std::string curRoom = neighbor_.room;
   Point curPos = neighbor_.pos;
   for (const TaskStep& st : neighborQueue_) {
@@ -1270,7 +1335,7 @@ void GameEngine::queueNeighborToRoom(const std::string& destRoom, Point destPos)
       if (hi > lo) outPos.x = std::clamp(outPos.x, lo, hi);
     }
 
-    enqueueRoomWalk(neighborQueue_, curRoom, curPos, inPos, false);
+    enqueueRoomWalk(neighborQueue_, curRoom, curPos, inPos, fast);
 
     TaskStep doorStep{};
     doorStep.type = TaskStep::Type::TraverseDoor;
@@ -1301,7 +1366,7 @@ void GameEngine::queueNeighborToRoom(const std::string& destRoom, Point destPos)
     curPos = outPos;
   }
   if (destPos.x >= 0) {
-    enqueueRoomWalk(neighborQueue_, curRoom, curPos, destPos, false);
+    enqueueRoomWalk(neighborQueue_, curRoom, curPos, destPos, fast);
   }
 }
 
@@ -2082,7 +2147,7 @@ void GameEngine::updateWoody() {
         doCombo.objNextAnim = "ms";
         doCombo.durationTicks = std::max(1, actTicks);
         doCombo.showProgressBar = true;
-        doCombo.nonInterruptible = true;
+        doCombo.nonInterruptible = false;
         doCombo.applyComboOnFinish = true;
         doCombo.combo = combo;
 
@@ -2158,15 +2223,28 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
     neighborQueue_.push_back(st);
   };
 
+  if (lowerName == "kit/laxativebeer") {
+    neighborHasLaxativeBeer_ = true;
+    pushStep(objIdx, "take", "ms0", "", "ms", 18);
+    return;
+  }
+  if (lowerName == "kit/beer") {
+    neighborHasLaxativeBeer_ = false;
+    pushStep(objIdx, "take", "ms0", "", "ms", 18);
+    return;
+  }
+
   // Special multi-phase handling for armchair (lir/sofa, lir/sofa_fartbag, lir/sofa_broken)
   if (lowerName == "lir/sofa" || lowerName == "lir/sofa_fartbag" || lowerName == "lir/sofa_broken") {
+    bool isSofaLevel = (toLowerAscii(level_.info.name).find("sofa") != std::string::npos);
     TaskStep enterSt{};
     enterSt.type = TaskStep::Type::PlayAction;
     enterSt.objectIndex = objIdx;
     enterSt.actorAnim = "inv";
     enterSt.actorNextAnim = "ms3";
     enterSt.objAnim = "neighbor_enter";
-    enterSt.objNextAnim = isTricked ? (lowerName == "lir/sofa_broken" ? "neighbor_fall" : "neighbor_surprise") : "neighbor_sit_remo";
+    enterSt.objNextAnim = isTricked ? (lowerName == "lir/sofa_broken" ? "neighbor_fall" : "neighbor_surprise")
+                                    : (isSofaLevel ? "neighbor_sit_beer" : "neighbor_sit_remo");
     enterSt.durationTicks = animFrameCount(od->gfx, "neighbor_enter", 6);
     neighborQueue_.push_back(enterSt);
 
@@ -2185,6 +2263,65 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
       surpSt.transformObjectTo = origName.empty() ? "lir/sofa" : origName;
       neighborQueue_.push_back(surpSt);
     } else {
+      if (isSofaLevel) {
+        TaskStep beerSt{};
+        beerSt.type = TaskStep::Type::PlayAction;
+        beerSt.objectIndex = objIdx;
+        beerSt.actorAnim = "inv";
+        beerSt.actorNextAnim = "ms3";
+        beerSt.objAnim = "neighbor_sit_beer";
+        beerSt.objNextAnim = neighborHasLaxativeBeer_ ? "neighbor_surprise" : "neighbor_sit_remo";
+        beerSt.durationTicks = animFrameCount(od->gfx, "neighbor_sit_beer", 32);
+        neighborQueue_.push_back(beerSt);
+
+        if (neighborHasLaxativeBeer_) {
+          neighborHasLaxativeBeer_ = false;
+          TaskStep surpSt{};
+          surpSt.type = TaskStep::Type::PlayAction;
+          surpSt.objectIndex = objIdx;
+          surpSt.actorAnim = "inv";
+          surpSt.actorNextAnim = "ms3";
+          surpSt.objAnim = "neighbor_surprise";
+          surpSt.objNextAnim = "neighbor_leave";
+          surpSt.durationTicks = animFrameCount(od->gfx, "neighbor_surprise", 36);
+          surpSt.triggerPrankScore = true;
+          auto laxTrick = level_.tricks.find("kit/laxativebeer");
+          if (laxTrick != level_.tricks.end()) surpSt.trick = laxTrick->second;
+          surpSt.transformObjectTo = "kit/beer";
+          neighborQueue_.push_back(surpSt);
+
+          TaskStep leaveSt{};
+          leaveSt.type = TaskStep::Type::PlayAction;
+          leaveSt.objectIndex = objIdx;
+          leaveSt.actorAnim = "inv";
+          leaveSt.actorNextAnim = "ms3";
+          leaveSt.objAnim = "neighbor_leave";
+          leaveSt.objNextAnim = "ms";
+          leaveSt.durationTicks = animFrameCount(od->gfx, "neighbor_leave", 6);
+          neighborQueue_.push_back(leaveSt);
+
+          currentBubbleIcon_ = "toilet";
+          int toiIdx = findObjectIndex("toi/toilet", "toi");
+          if (toiIdx < 0) toiIdx = findObjectIndex("toi/toiletstuffed", "toi");
+          Point toiHs{505, 397};
+          if (toiIdx >= 0) {
+            const PlacedObject& toiPo = level_.objects[toiIdx];
+            const ObjectDef* toiOd = level_.findObjectDef(toiPo.name);
+            toiHs = toiOd ? toiOd->hotspotOr("neighbor", Point{505, 397}) : Point{505, 397};
+            toiHs.x += toiPo.position.x;
+            toiHs.y += toiPo.position.y;
+          }
+          queueNeighborToRoom("toi", toiHs, true);
+          if (toiIdx >= 0) {
+            TaskStep interToi{};
+            interToi.type = TaskStep::Type::InteractObject;
+            interToi.objectIndex = toiIdx;
+            neighborQueue_.push_back(interToi);
+          }
+          return;
+        }
+      }
+
       TaskStep remoSt{};
       remoSt.type = TaskStep::Type::PlayAction;
       remoSt.objectIndex = objIdx;
@@ -2194,7 +2331,6 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
       remoSt.durationTicks = animFrameCount(od->gfx, "neighbor_sit_remo", 27);
       neighborQueue_.push_back(remoSt);
 
-      // If TV antenna was twisted (lir/twistedantenna exists in lir), Neighbor gets up immediately to fix it!
       int tvTrickIdx = findObjectIndex("lir/twistedantenna", po.roomName);
       if (tvTrickIdx < 0) {
         TaskStep sitSt{};
@@ -2218,7 +2354,6 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
       neighborQueue_.push_back(leaveSt);
     }
 
-    // After getting up from the sofa, if lir/twistedantenna is active in the room, walk over and repair it!
     int tvTrickIdx = findObjectIndex("lir/twistedantenna", po.roomName);
     if (tvTrickIdx >= 0) {
       const PlacedObject& tvPo = level_.objects[tvTrickIdx];
@@ -2227,7 +2362,7 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
       tvHs.x += tvPo.position.x;
       tvHs.y += tvPo.position.y;
       Point curPos = neighbor_.pos;
-      enqueueRoomWalk(neighborQueue_, po.roomName, curPos, tvHs, false);
+      enqueueRoomWalk(neighborQueue_, po.roomName, curPos, tvHs, true);
       TaskStep fixTv{};
       fixTv.type = TaskStep::Type::InteractObject;
       fixTv.objectIndex = tvTrickIdx;
@@ -2341,8 +2476,29 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
     }
     return;
   }
-  if (lowerName == "toi/toilet") {
-    pushStep(objIdx, "pee", "ms0", "", "ms", 36);
+  if (lowerName == "toi/toilet" || lowerName == "toi/toiletstuffed") {
+    int paperBracketIdx = findObjectIndex("toi/paperbracket", po.roomName);
+    bool hasPaper = (paperBracketIdx >= 0 && !level_.objects[paperBracketIdx].items.empty());
+    bool isStuffed = (lowerName == "toi/toiletstuffed");
+
+    int shitFrames = animFrameCount("toi/toilet", "neighbor_shit", 86);
+    pushStep(objIdx, "inv", "inv", "neighbor_shit", (hasPaper && !isStuffed) ? "grabpaper" : "nopaper", shitFrames);
+
+    if (hasPaper && !isStuffed) {
+      int grabFrames = animFrameCount("toi/toilet", "grabpaper", 6);
+      pushStep(objIdx, "inv", "ms2", "grabpaper", "ms", grabFrames);
+    } else {
+      int noPaperFrames = animFrameCount("toi/toilet", "nopaper", 15);
+      auto tpTrick = level_.tricks.find(isStuffed ? "toi/toiletstuffed" : "toiletpaper");
+      pushStep(objIdx, "inv", "ms2", "nopaper", "ms", noPaperFrames, "toi/toilet",
+               tpTrick != level_.tricks.end(), tpTrick != level_.tricks.end() ? &tpTrick->second : nullptr);
+    }
+    return;
+  }
+  if (lowerName == "lir/twistedantenna") {
+    auto tvTrick = level_.tricks.find("lir/twistedantenna");
+    pushStep(objIdx, "use_mid", "ms0", "", "ms", 23, "lir/tv",
+             tvTrick != level_.tricks.end(), tvTrick != level_.tricks.end() ? &tvTrick->second : nullptr);
     return;
   }
   if (lowerName == "lir/score") {
@@ -2735,6 +2891,35 @@ void GameEngine::updateNeighbor() {
         }
       }
     }
+
+    // Check if lir/twistedantenna is active in the room with Neighbor - Neighbor runs to fix TV!
+    if (toLowerAscii(neighbor_.room) == "lir") {
+      int tvTrickIdx = findObjectIndex("lir/twistedantenna", "lir");
+      if (tvTrickIdx >= 0) {
+        bool alreadyFixing = false;
+        for (const TaskStep& st : neighborQueue_) {
+          if (st.objectIndex == tvTrickIdx) {
+            alreadyFixing = true;
+            break;
+          }
+        }
+        if (!alreadyFixing) {
+          const PlacedObject& tvPo = level_.objects[tvTrickIdx];
+          const ObjectDef* tvOd = level_.findObjectDef(tvPo.name);
+          Point tvHs = tvOd ? tvOd->hotspotOr("neighbor", Point{200, 420}) : Point{200, 420};
+          tvHs.x += tvPo.position.x;
+          tvHs.y += tvPo.position.y;
+          interruptedRoutineIdx_ = currentRoutineIdx_;
+          neighborQueue_.clear();
+          Point curPos = neighbor_.pos;
+          enqueueRoomWalk(neighborQueue_, "lir", curPos, tvHs, true);  // RUN!
+          TaskStep inter{};
+          inter.type = TaskStep::Type::InteractObject;
+          inter.objectIndex = tvTrickIdx;
+          neighborQueue_.push_back(inter);
+        }
+      }
+    }
   }
 
   while (!neighborQueue_.empty()) {
@@ -3053,7 +3238,7 @@ void GameEngine::checkStealthDetection() {
     }
   }
 
-  bool woodyInTransition = woody_.hidden ||
+  bool woodyInTransition = (woody_.hidingInObject >= 0) ||
       (!woodyQueue_.empty() && (woodyQueue_.front().type == TaskStep::Type::TraverseDoor ||
                                 woodyQueue_.front().enterHideout || woodyQueue_.front().leaveHideout));
   if (woodyInTransition || neighbor_.hidden || toLowerAscii(woody_.room) != toLowerAscii(neighbor_.room)) {
@@ -3116,6 +3301,16 @@ void GameEngine::checkStealthDetection() {
       woodyQueue_.clear();
       woodyActionTicks_ = woodyActionTotalTicks_ = 0;
       woodyBusyInAnim_ = true;
+      if (woody_.hidingInObject < 0) {
+        woody_.hidden = false;
+      }
+      for (PlacedObject& po : level_.objects) {
+        if (po.currentAnim.rfind("woody_", 0) == 0) {
+          po.currentAnim = "ms";
+          po.nextAnim = "ms";
+          po.animFrame = 0;
+        }
+      }
       int fearFacing = (neighbor_.pos.x > woody_.pos.x) ? 1 : 3;
       woody_.facing = fearFacing;
       woody_.currentAnim = (fearFacing == 1) ? "fear1" : "fear3";
@@ -3125,7 +3320,6 @@ void GameEngine::checkStealthDetection() {
 
     cursorVpath_ = "gfx/cursor/camera.tga";
     woodyBusyInAnim_ = true;
-    advanceActorAnim(woody_);
 
     if (neighborAlertTicks_ > 0) {
       neighborAlertTicks_--;
@@ -3283,7 +3477,7 @@ void GameEngine::drawMenuTextWrapped(TextRenderer& font, const std::string& text
 }
 
 void GameEngine::renderObject(const PlacedObject& po) {
-  if (!po.visible || po.currentAnim == "inv" || toLowerAscii(po.currentAnim) == "empty" || toLowerAscii(po.name) == "house") return;
+  if (!po.visible || po.currentAnim == "inv" || toLowerAscii(po.name) == "house") return;
   const RoomDef* r = level_.findRoom(po.roomName);
   const Point base{po.position.x + (r ? r->offset.x : 0), po.position.y + (r ? r->offset.y : 0)};
 
@@ -3334,40 +3528,56 @@ void GameEngine::renderActor(const ActorState& a) {
   float wy = float(r->offset.y + (a.pos.y - hotspot.y) + fr.offset.y);
   SDL_FRect dst = worldToScreen(wx, wy, float(tex->w), float(tex->h));
   SDL_RenderCopyF(ren_, tex->tex, nullptr, &dst);
+}
 
-  // Draw progress bar above Woody when setting a trap
-  if (toLowerAscii(a.name) == "woody" && woodyActionTotalTicks_ > 0 && woodyActionTicks_ > 0) {
-    const TexEntry* pbBack = getTexture("gfx/gui/ingame/ingame_progress_back.tga");
-    const TexEntry* pbFront = getTexture("gfx/gui/ingame/ingame_progress_front.tga");
-    if (pbBack && pbFront) {
-      float pbx = float(r->offset.x + a.pos.x) - float(pbBack->w) * 0.5f;
-      float pby = float(r->offset.y + a.pos.y - 130);
-      SDL_FRect bDst = worldToScreen(pbx, pby, float(pbBack->w), float(pbBack->h));
-      SDL_RenderCopyF(ren_, pbBack->tex, nullptr, &bDst);
-      float frac = 1.0f - float(woodyActionTicks_) / float(woodyActionTotalTicks_);
-      int srcW = std::clamp(int(pbFront->w * frac), 0, pbFront->w);
-      SDL_Rect src{0, 0, srcW, pbFront->h};
-      SDL_FRect fDst = worldToScreen(pbx, pby, float(srcW), float(pbFront->h));
-      SDL_RenderCopyF(ren_, pbFront->tex, &src, &fDst);
+void GameEngine::renderWoodyProgressBar() {
+  if (woodyActionTotalTicks_ <= 0 || woodyActionTicks_ <= 0) return;
+  const RoomDef* r = level_.findRoom(woody_.room);
+  if (!r) return;
 
-      // Centered percentage text with black outline (e.g. "73%")
-      int pct = std::clamp(int(std::round(frac * 100.0f)), 0, 100);
-      char pctBuf[16];
-      std::snprintf(pctBuf, sizeof pctBuf, "%d%%", pct);
-      float tScale = (bDst.h > 0.0f) ? (bDst.h * 0.72f / 26.0f) : 1.0f;
-      float o = std::max(1.0f, tScale * 1.5f);
-      SDL_Color black{0, 0, 0, 255};
-      SDL_Color yellow{255, 235, 40, 255};
-      fontHud_.drawAlignedScaled(pctBuf, SDL_FRect{bDst.x + o, bDst.y, bDst.w, bDst.h}, black, tScale, 0, 0);
-      fontHud_.drawAlignedScaled(pctBuf, SDL_FRect{bDst.x - o, bDst.y, bDst.w, bDst.h}, black, tScale, 0, 0);
-      fontHud_.drawAlignedScaled(pctBuf, SDL_FRect{bDst.x, bDst.y + o, bDst.w, bDst.h}, black, tScale, 0, 0);
-      fontHud_.drawAlignedScaled(pctBuf, SDL_FRect{bDst.x, bDst.y - o, bDst.w, bDst.h}, black, tScale, 0, 0);
-      fontHud_.drawAlignedScaled(pctBuf, SDL_FRect{bDst.x + o, bDst.y + o, bDst.w, bDst.h}, black, tScale, 0, 0);
-      fontHud_.drawAlignedScaled(pctBuf, SDL_FRect{bDst.x - o, bDst.y - o, bDst.w, bDst.h}, black, tScale, 0, 0);
-      fontHud_.drawAlignedScaled(pctBuf, SDL_FRect{bDst.x + o, bDst.y - o, bDst.w, bDst.h}, black, tScale, 0, 0);
-      fontHud_.drawAlignedScaled(pctBuf, SDL_FRect{bDst.x - o, bDst.y + o, bDst.w, bDst.h}, black, tScale, 0, 0);
-      fontHud_.drawAlignedScaled(pctBuf, bDst, yellow, tScale, 0, 0);
+  float pbx = float(r->offset.x + woody_.pos.x);
+  float pby = float(r->offset.y + woody_.pos.y - 130);
+
+  if (!woodyQueue_.empty() && woodyQueue_.front().objectIndex >= 0 &&
+      woodyQueue_.front().objectIndex < (int)level_.objects.size()) {
+    const PlacedObject& po = level_.objects[woodyQueue_.front().objectIndex];
+    const ObjectDef* od = level_.findObjectDef(po.name);
+    if (od && od->hotspots.count("progressbar") > 0) {
+      Point pbHs = od->hotspots.at("progressbar");
+      pbx = float(r->offset.x + po.position.x + pbHs.x);
+      pby = float(r->offset.y + po.position.y + pbHs.y);
     }
+  }
+
+  const TexEntry* pbBack = getTexture("gfx/gui/ingame/ingame_progress_back.tga");
+  const TexEntry* pbFront = getTexture("gfx/gui/ingame/ingame_progress_front.tga");
+  if (pbBack && pbFront) {
+    float drawX = pbx - float(pbBack->w) * 0.5f;
+    float drawY = pby - float(pbBack->h) * 0.5f;
+    SDL_FRect bDst = worldToScreen(drawX, drawY, float(pbBack->w), float(pbBack->h));
+    SDL_RenderCopyF(ren_, pbBack->tex, nullptr, &bDst);
+    float frac = 1.0f - float(woodyActionTicks_) / float(woodyActionTotalTicks_);
+    int srcW = std::clamp(int(pbFront->w * frac), 0, pbFront->w);
+    SDL_Rect src{0, 0, srcW, pbFront->h};
+    SDL_FRect fDst = worldToScreen(drawX, drawY, float(srcW), float(pbFront->h));
+    SDL_RenderCopyF(ren_, pbFront->tex, &src, &fDst);
+
+    int pct = std::clamp(int(std::round(frac * 100.0f)), 0, 100);
+    char pctBuf[16];
+    std::snprintf(pctBuf, sizeof pctBuf, "%d%%", pct);
+    float tScale = (bDst.h > 0.0f) ? (bDst.h * 0.72f / 26.0f) : 1.0f;
+    float o = std::max(1.0f, tScale * 1.5f);
+    SDL_Color black{0, 0, 0, 255};
+    SDL_Color yellow{255, 235, 40, 255};
+    fontHud_.drawAlignedScaled(pctBuf, SDL_FRect{bDst.x + o, bDst.y, bDst.w, bDst.h}, black, tScale, 0, 0);
+    fontHud_.drawAlignedScaled(pctBuf, SDL_FRect{bDst.x - o, bDst.y, bDst.w, bDst.h}, black, tScale, 0, 0);
+    fontHud_.drawAlignedScaled(pctBuf, SDL_FRect{bDst.x, bDst.y + o, bDst.w, bDst.h}, black, tScale, 0, 0);
+    fontHud_.drawAlignedScaled(pctBuf, SDL_FRect{bDst.x, bDst.y - o, bDst.w, bDst.h}, black, tScale, 0, 0);
+    fontHud_.drawAlignedScaled(pctBuf, SDL_FRect{bDst.x + o, bDst.y + o, bDst.w, bDst.h}, black, tScale, 0, 0);
+    fontHud_.drawAlignedScaled(pctBuf, SDL_FRect{bDst.x - o, bDst.y - o, bDst.w, bDst.h}, black, tScale, 0, 0);
+    fontHud_.drawAlignedScaled(pctBuf, SDL_FRect{bDst.x + o, bDst.y - o, bDst.w, bDst.h}, black, tScale, 0, 0);
+    fontHud_.drawAlignedScaled(pctBuf, SDL_FRect{bDst.x - o, bDst.y + o, bDst.w, bDst.h}, black, tScale, 0, 0);
+    fontHud_.drawAlignedScaled(pctBuf, bDst, yellow, tScale, 0, 0);
   }
 }
 
@@ -3460,6 +3670,7 @@ void GameEngine::renderWorld() {
   }
   renderActor(neighbor_);
   renderActor(woody_);
+  renderWoodyProgressBar();
 
   // Thought bubble for "to look"
   if (lookBubbleTicks_ > 0 && !lookBubbleText_.empty()) {
@@ -3588,8 +3799,8 @@ void GameEngine::renderHud() {
     }
   }
 
-  // Comic thought bubble on 1 second hover over inventory item
-  if (hoveredInvSlot_ >= 0 && hoveredInvSlot_ < 5 && hoveredInvTicks_ >= 12) {
+  // Comic thought bubble on 2 second hover over inventory item
+  if (hoveredInvSlot_ >= 0 && hoveredInvSlot_ < 5 && hoveredInvTicks_ >= kTicksPerSecond * 2) {
     int hIdx = invScroll_ + hoveredInvSlot_;
     if (hIdx >= 0 && hIdx < (int)inventory_.size()) {
       const std::string& itemKey = inventory_[hIdx];
