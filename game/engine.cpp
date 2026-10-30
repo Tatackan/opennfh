@@ -975,9 +975,7 @@ const CombinationDef* GameEngine::findCombination(const std::string& targetName,
 // ---------------------------------------------------------------------------
 
 float GameEngine::getHudScale() const {
-  float s = std::min(float(winW_) / 800.0f, float(winH_) / 480.0f);
-  if (fullscreen_) s *= 0.90f;
-  return s;
+  return float(winW_) / 800.0f;
 }
 
 void GameEngine::updateHover(int worldX, int worldY, int screenX, int screenY) {
@@ -1428,11 +1426,15 @@ void GameEngine::onLeftClick(int worldX, int worldY, int screenX, int screenY, b
     const PlacedObject& po = level_.objects[hoveredObject_];
     const ObjectDef* od = level_.findObjectDef(po.name);
 
-    // Exit door: walk up, step through the door and open exit confirmation dialog
+    // Exit door: walk up in front of the door inside anc, do NOT open or step through, and show exit confirmation dialog
     if (toLowerAscii(po.name) == "anc/fro" || (od && toLowerAscii(od->stdAction) == "end" && toLowerAscii(po.roomName) == "anc")) {
       selectedInv_ = -1;
       queuePathToRoom("anc", doubleClick);
-      queuePathToRoom("fro", doubleClick);
+      Point curPos = currentWoodyEndPos();
+      Point targetPos = od ? od->hotspotOr("woody", Point{100, 420}) : Point{100, 420};
+      targetPos.x += po.position.x;
+      targetPos.y += po.position.y;
+      enqueueRoomWalk(woodyQueue_, "anc", curPos, targetPos, doubleClick);
       TaskStep exitStep{};
       exitStep.type = TaskStep::Type::PlayAction;
       exitStep.actorAnim = "ms2";
@@ -1723,6 +1725,39 @@ void GameEngine::updateWoody() {
           continue;
         }
         if (step.elapsedTicks == 0) {
+          // If Neighbor has already started opening/traversing this door, Woody must wait
+          bool neighborUsingDoor = false;
+          if (step.objectIndex >= 0 && step.objectIndex < (int)level_.objects.size()) {
+            const PlacedObject& dIn = level_.objects[step.objectIndex];
+            if (dIn.currentAnim == "neighbor_enter" || dIn.currentAnim == "neighbor_leave") {
+              neighborUsingDoor = true;
+            }
+          }
+          if (step.outObjectIndex >= 0 && step.outObjectIndex < (int)level_.objects.size()) {
+            const PlacedObject& dOut = level_.objects[step.outObjectIndex];
+            if (dOut.currentAnim == "neighbor_enter" || dOut.currentAnim == "neighbor_leave") {
+              neighborUsingDoor = true;
+            }
+          }
+          if (!neighborQueue_.empty() && neighborQueue_.front().type == TaskStep::Type::TraverseDoor) {
+            const TaskStep& nStep = neighborQueue_.front();
+            if (nStep.objectIndex == step.objectIndex || nStep.objectIndex == step.outObjectIndex ||
+                nStep.outObjectIndex == step.objectIndex || nStep.outObjectIndex == step.outObjectIndex) {
+              neighborUsingDoor = true;
+            }
+          }
+
+          if (neighborUsingDoor) {
+            if (woody_.currentAnim != "idle1") {
+              woody_.currentAnim = "idle1";
+              woody_.nextAnim = "idle1";
+              woody_.animFrame = 0;
+            }
+            woody_.hidden = false;
+            advanceActorAnim(woody_);
+            return;
+          }
+
           woody_.hidden = true;
           if (step.objectIndex >= 0 && step.objectIndex < (int)level_.objects.size()) {
             PlacedObject& doorIn = level_.objects[step.objectIndex];
@@ -2782,6 +2817,22 @@ void GameEngine::updateNeighbor() {
           continue;
         }
         if (step.elapsedTicks == 0) {
+          bool woodyUsingDoor = false;
+          if (step.objectIndex >= 0 && step.objectIndex < (int)level_.objects.size()) {
+            const PlacedObject& dIn = level_.objects[step.objectIndex];
+            if (dIn.currentAnim == "woody_enter" || dIn.currentAnim == "woody_leave") woodyUsingDoor = true;
+          }
+          if (step.outObjectIndex >= 0 && step.outObjectIndex < (int)level_.objects.size()) {
+            const PlacedObject& dOut = level_.objects[step.outObjectIndex];
+            if (dOut.currentAnim == "woody_enter" || dOut.currentAnim == "woody_leave") woodyUsingDoor = true;
+          }
+          if (woodyUsingDoor) {
+            neighbor_.currentAnim = "ms2";
+            neighbor_.nextAnim = "ms2";
+            neighbor_.animFrame = 0;
+            return;
+          }
+
           neighbor_.hidden = true;
           if (step.objectIndex >= 0 && step.objectIndex < (int)level_.objects.size()) {
             PlacedObject& doorIn = level_.objects[step.objectIndex];
@@ -3200,6 +3251,30 @@ bool GameEngine::drawMenuButton(const std::string& stdImg, const std::string& ho
   return hovered;
 }
 
+void GameEngine::drawMenuText(TextRenderer& font, const std::string& text, int mx, int my, int mw, int mh,
+                              SDL_Color c, int halign, int valign, float maxScaleMul) {
+  if (text.empty() || mw <= 0 || mh <= 0) return;
+  SDL_Rect box = menuRect(mx, my, mw, mh);
+  float ms = menuScale();
+  float sc = ms * maxScaleMul;
+  int w = font.width(text);
+  int lh = font.lineHeight();
+  if (w > 0 && float(w) * sc > float(box.w) - 4.0f) {
+    sc = std::max(0.2f, (float(box.w) - 4.0f) / float(w));
+  }
+  if (lh > 0 && float(lh) * sc > float(box.h) - 2.0f) {
+    sc = std::max(0.2f, (float(box.h) - 2.0f) / float(lh));
+  }
+  font.drawAligned(text, box, c, halign, valign, sc);
+}
+
+void GameEngine::drawMenuTextWrapped(TextRenderer& font, const std::string& text, int mx, int my, int mw, int mh,
+                                     SDL_Color c, int halign, int valign) {
+  if (text.empty() || mw <= 0 || mh <= 0) return;
+  SDL_Rect box = menuRect(mx, my, mw, mh);
+  font.drawWrapped(text, box, c, halign, valign, menuScale());
+}
+
 void GameEngine::renderObject(const PlacedObject& po) {
   if (!po.visible || po.currentAnim == "inv" || toLowerAscii(po.currentAnim) == "empty" || toLowerAscii(po.name) == "house") return;
   const RoomDef* r = level_.findRoom(po.roomName);
@@ -3448,12 +3523,6 @@ void GameEngine::renderHud() {
     }
   };
 
-  // Darken strip behind HUD
-  int hudStripH = int(134 * hudScale);
-  SDL_SetRenderDrawColor(ren_, 18, 20, 26, 235);
-  SDL_Rect strip{0, winH_ - hudStripH, winW_, hudStripH};
-  SDL_RenderFillRect(ren_, &strip);
-
   // Left: thought bubble, rage-o-meter, neighbor head
   drawGui("gfx/gui/ingame/interface_left_bubble_norm.tga", 0, 466);
   if (!currentBubbleIcon_.empty()) {
@@ -3645,10 +3714,10 @@ void GameEngine::renderBriefingRightPanel(int levelIdx, bool isInGameMenu) {
 
   // Caption ("Описание серии")
   std::string rightCap = menuStrings_["newgamerightcaption"].empty() ? "Описание серии" : menuStrings_["newgamerightcaption"];
-  fontComicBig_.drawAligned(rightCap, menuRect(400, 0, 375, 50), SDL_Color{255, 255, 255, 255}, 1, 0);
+  drawMenuText(fontComicBig_, rightCap, 400, 0, 375, 50, SDL_Color{255, 255, 255, 255}, 1, 0);
 
   // Episode title
-  fontComicBig_.drawAligned(bi.title, menuRect(400 + 32, 61, 335, 53), SDL_Color{0, 0, 0, 255}, -1, 0);
+  drawMenuText(fontComicBig_, bi.title, 400 + 32, 61, 335, 53, SDL_Color{0, 0, 0, 255}, -1, 0, 1.15f);
 
   // Level preview image
   drawMenuImage("gfx/gui/main/" + li.name + ".tga", 400 + 28, 121);
@@ -3656,10 +3725,10 @@ void GameEngine::renderBriefingRightPanel(int levelIdx, bool isInGameMenu) {
   // Min quota & Time limit
   char qNum[16];
   std::snprintf(qNum, sizeof qNum, "%d", li.minQuota);
-  fontBig_.drawAligned(qNum, menuRect(400 + 212, 147, 46, 26), SDL_Color{255, 255, 255, 255}, 1, 1);
-  fontSmall_.drawAligned("%", menuRect(400 + 260, 150, 18, 22), SDL_Color{255, 255, 255, 255}, -1, 1);
-  fontSmall_.drawAligned(menuStrings_["minquotacap"].empty() ? "Миним. оценка" : menuStrings_["minquotacap"],
-                         menuRect(400 + 187, 178, 88, 20), SDL_Color{255, 255, 255, 255}, 0, -1);
+  drawMenuText(fontBig_, qNum, 400 + 212, 147, 46, 26, SDL_Color{255, 255, 255, 255}, 1, 1);
+  drawMenuText(fontSmall_, "%", 400 + 260, 150, 18, 22, SDL_Color{255, 255, 255, 255}, -1, 1);
+  drawMenuText(fontSmall_, menuStrings_["minquotacap"].empty() ? "Миним. оценка" : menuStrings_["minquotacap"],
+               400 + 187, 178, 88, 20, SDL_Color{255, 255, 255, 255}, 0, -1);
 
   char tNum[16];
   if (li.timeTicks <= 0) {
@@ -3668,41 +3737,41 @@ void GameEngine::renderBriefingRightPanel(int levelIdx, bool isInGameMenu) {
     int mins = (li.timeTicks / kTicksPerSecond) / 60;
     std::snprintf(tNum, sizeof tNum, "%d", mins);
   }
-  fontBig_.drawAligned(tNum, menuRect(400 + 290, 147, 50, 26), SDL_Color{255, 255, 255, 255}, 1, 1);
-  fontSmall_.drawAligned(menuStrings_["timeunit"].empty() ? "мин" : menuStrings_["timeunit"],
-                         menuRect(400 + 342, 150, 30, 22), SDL_Color{255, 255, 255, 255}, -1, 1);
-  fontSmall_.drawAligned(menuStrings_["timecap"].empty() ? "Время" : menuStrings_["timecap"],
-                         menuRect(400 + 282, 178, 88, 20), SDL_Color{255, 255, 255, 255}, 0, -1);
+  drawMenuText(fontBig_, tNum, 400 + 290, 147, 50, 26, SDL_Color{255, 255, 255, 255}, 1, 1);
+  drawMenuText(fontSmall_, menuStrings_["timeunit"].empty() ? "мин" : menuStrings_["timeunit"],
+               400 + 342, 150, 30, 22, SDL_Color{255, 255, 255, 255}, -1, 1);
+  drawMenuText(fontSmall_, menuStrings_["timecap"].empty() ? "Время" : menuStrings_["timecap"],
+               400 + 282, 178, 88, 20, SDL_Color{255, 255, 255, 255}, 0, -1);
 
   // Hint
-  fontUI_.drawAligned(menuStrings_["hinttitle"].empty() ? "Подсказка!" : menuStrings_["hinttitle"],
-                      menuRect(400 + 190, 202, 177, 22), SDL_Color{0, 96, 255, 255}, 0, 0);
-  fontSmall_.drawWrapped(bi.hintText, menuRect(400 + 190, 223, 177, 56), SDL_Color{0, 0, 0, 255}, 0, 0);
+  drawMenuText(fontUI_, menuStrings_["hinttitle"].empty() ? "Подсказка!" : menuStrings_["hinttitle"],
+               400 + 190, 202, 177, 22, SDL_Color{0, 96, 255, 255}, 0, 0);
+  drawMenuTextWrapped(fontSmall_, bi.hintText, 400 + 190, 223, 177, 56, SDL_Color{0, 0, 0, 255}, 0, 0);
 
   // Photo caption & Story briefing
-  fontSmall_.drawAligned(bi.picText, menuRect(400 + 28, 264, 155, 22), SDL_Color{0, 0, 0, 255}, -1, -1);
-  fontSmall_.drawWrapped(bi.briefing, menuRect(400 + 28, 287, 343, 178), SDL_Color{0, 0, 0, 255}, -1, -1);
+  drawMenuText(fontSmall_, bi.picText, 400 + 28, 264, 155, 22, SDL_Color{0, 0, 0, 255}, -1, -1);
+  drawMenuTextWrapped(fontSmall_, bi.briefing, 400 + 28, 287, 343, 178, SDL_Color{0, 0, 0, 255}, -1, -1);
 
   // Record score for this episode
   const LevelProgress& lp = progress_[toLowerAscii(li.name)];
-  fontComicSmall_.drawAligned(menuStrings_["lastscoretitle"].empty() ? "Рекорд серии:" : menuStrings_["lastscoretitle"],
-                              menuRect(400 + 67, 475, 189, 23), SDL_Color{0, 0, 0, 255}, -1, 0);
-  fontComicSmall_.drawAligned(menuStrings_["lasttrickscap"].empty() ? "Пакостей" : menuStrings_["lasttrickscap"],
-                              menuRect(400 + 30, 499, 155, 23), SDL_Color{0, 0, 0, 255}, 0, 0);
+  drawMenuText(fontComicSmall_, menuStrings_["lastscoretitle"].empty() ? "Рекорд серии:" : menuStrings_["lastscoretitle"],
+               400 + 67, 475, 189, 23, SDL_Color{0, 0, 0, 255}, -1, 0);
+  drawMenuText(fontComicSmall_, menuStrings_["lasttrickscap"].empty() ? "Пакостей" : menuStrings_["lasttrickscap"],
+               400 + 30, 499, 155, 23, SDL_Color{0, 0, 0, 255}, 0, 0);
   char trRec[32];
   std::snprintf(trRec, sizeof trRec, "%d / %d", lp.bestTricks, li.reachable);
-  fontUI_.drawAligned(trRec, menuRect(400 + 55, 521, 115, 24), SDL_Color{0, 0, 0, 255}, 0, 0);
+  drawMenuText(fontUI_, trRec, 400 + 55, 521, 115, 24, SDL_Color{0, 0, 0, 255}, 0, 0);
 
-  fontComicSmall_.drawAligned(menuStrings_["lastquotacap"].empty() ? "Оценка" : menuStrings_["lastquotacap"],
-                              menuRect(400 + 191, 499, 63, 23), SDL_Color{0, 0, 0, 255}, 0, 0);
+  drawMenuText(fontComicSmall_, menuStrings_["lastquotacap"].empty() ? "Оценка" : menuStrings_["lastquotacap"],
+               400 + 191, 499, 63, 23, SDL_Color{0, 0, 0, 255}, 0, 0);
   char qRec[32];
   std::snprintf(qRec, sizeof qRec, "%d %%", lp.bestQuota);
-  fontUI_.drawAligned(qRec, menuRect(400 + 191, 521, 63, 24), SDL_Color{0, 0, 0, 255}, 0, 0);
+  drawMenuText(fontUI_, qRec, 400 + 191, 521, 63, 24, SDL_Color{0, 0, 0, 255}, 0, 0);
 
   // Play / Continue label & button
   std::string actLabel = isInGameMenu ? (menuStrings_["continuetext"].empty() ? "Назад в игру" : menuStrings_["continuetext"])
                                       : (menuStrings_["play"].empty() ? "Съемка" : menuStrings_["play"]);
-  fontComic_.drawWrapped(actLabel, menuRect(400 + 269, 475, 103, 55), SDL_Color{0, 0, 0, 255}, 0, 0);
+  drawMenuTextWrapped(fontComic_, actLabel, 400 + 269, 475, 103, 55, SDL_Color{0, 0, 0, 255}, 0, 0);
   drawMenuButton("gfx/gui/main/start_right_std.tga", "gfx/gui/main/start_right_hover.tga",
                  "gfx/gui/main/start_right_pressed.tga", 400 + 320, 530, 0, 0, "", fontUI_,
                  SDL_Color{}, SDL_Color{}, mp, mouseLeftDown_);
@@ -3712,17 +3781,17 @@ void GameEngine::renderEpisodeSelect() {
   Point mp = screenToMenu(mouseX_, mouseY_);
   drawMenuImage("gfx/gui/main/newgameleft.tga", 0, 0);
 
-  // Header & Season titles
-  fontComicBig_.drawAligned(menuStrings_["newgamecaption"].empty() ? "Список серий" : menuStrings_["newgamecaption"],
-                            menuRect(75, 0, 350, 50), SDL_Color{255, 255, 255, 255}, -1, 0);
-  fontSeason_.drawAligned(menuStrings_["tutseason"].empty() ? "Пилотные серии" : menuStrings_["tutseason"],
-                          menuRect(55, 60, 320, 26), SDL_Color{0, 0, 0, 255}, -1, 0);
-  fontSeason_.drawAligned(menuStrings_["season1"].empty() ? "Сезон 1" : menuStrings_["season1"],
-                          menuRect(55, 159, 320, 26), SDL_Color{0, 0, 0, 255}, -1, 0);
-  fontSeason_.drawAligned(menuStrings_["season2"].empty() ? "Сезон 2" : menuStrings_["season2"],
-                          menuRect(55, 322, 320, 26), SDL_Color{0, 0, 0, 255}, -1, 0);
-  fontSeason_.drawAligned(menuStrings_["season3"].empty() ? "Сезон 3" : menuStrings_["season3"],
-                          menuRect(55, 421, 320, 26), SDL_Color{0, 0, 0, 255}, -1, 0);
+  // Header & Season titles (scaled to vertically fill field height cleanly without overflowing)
+  drawMenuText(fontComicBig_, menuStrings_["newgamecaption"].empty() ? "Список серий" : menuStrings_["newgamecaption"],
+               75, 0, 350, 50, SDL_Color{255, 255, 255, 255}, -1, 0, 1.0f);
+  drawMenuText(fontSeason_, menuStrings_["tutseason"].empty() ? "Пилотные серии" : menuStrings_["tutseason"],
+               55, 60, 320, 26, SDL_Color{0, 0, 0, 255}, -1, 0, 1.30f);
+  drawMenuText(fontSeason_, menuStrings_["season1"].empty() ? "Сезон 1" : menuStrings_["season1"],
+               55, 159, 320, 26, SDL_Color{0, 0, 0, 255}, -1, 0, 1.30f);
+  drawMenuText(fontSeason_, menuStrings_["season2"].empty() ? "Сезон 2" : menuStrings_["season2"],
+               55, 322, 320, 26, SDL_Color{0, 0, 0, 255}, -1, 0, 1.30f);
+  drawMenuText(fontSeason_, menuStrings_["season3"].empty() ? "Сезон 3" : menuStrings_["season3"],
+               55, 421, 320, 26, SDL_Color{0, 0, 0, 255}, -1, 0, 1.30f);
 
   auto isSeasonCompleted = [&](const std::initializer_list<const char*>& levelNames) {
     for (const char* name : levelNames) {
@@ -3775,13 +3844,13 @@ void GameEngine::renderEpisodeSelect() {
     // Best score % badge at the bottom of the button
     char scoreTxt[16];
     std::snprintf(scoreTxt, sizeof scoreTxt, "%d %%", lp.bestQuota);
-    fontSmall_.drawAligned(scoreTxt, menuRect(bi.menuX, bi.menuY + 41, 75, 18),
-                           hovered ? SDL_Color{255, 255, 160, 255} : SDL_Color{255, 255, 255, 255}, 0, 0);
+    drawMenuText(fontSmall_, scoreTxt, bi.menuX, bi.menuY + 41, 75, 18,
+                 hovered ? SDL_Color{255, 255, 160, 255} : SDL_Color{255, 255, 255, 255}, 0, 0);
   }
 
   // Back to main menu button
-  fontComic_.drawAligned(menuStrings_["canceltext"].empty() ? "Вернуться в главное меню" : menuStrings_["canceltext"],
-                         menuRect(90, 521, 282, 25), SDL_Color{0, 0, 0, 255}, -1, 0);
+  drawMenuText(fontComic_, menuStrings_["canceltext"].empty() ? "Вернуться в главное меню" : menuStrings_["canceltext"],
+               90, 521, 282, 25, SDL_Color{0, 0, 0, 255}, -1, 0);
   drawMenuButton("gfx/gui/main/exit_std.tga", "gfx/gui/main/exit_hover.tga", "gfx/gui/main/exit_pressed.tga",
                  25, 530, 0, 0, "", fontUI_, SDL_Color{}, SDL_Color{}, mp, mouseLeftDown_);
 

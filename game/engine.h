@@ -162,6 +162,10 @@ class GameEngine {
   bool drawMenuButton(const std::string& stdImg, const std::string& hovImg, const std::string& downImg,
                       int x, int y, int w, int h, const std::string& caption, TextRenderer& font,
                       SDL_Color stdColor, SDL_Color hovColor, Point menuMouse, bool mouseDown, bool* outHovered = nullptr);
+  void drawMenuText(TextRenderer& font, const std::string& text, int mx, int my, int mw, int mh,
+                    SDL_Color c, int halign = 0, int valign = 0, float maxScaleMul = 1.0f);
+  void drawMenuTextWrapped(TextRenderer& font, const std::string& text, int mx, int my, int mw, int mh,
+                           SDL_Color c, int halign = 0, int valign = 0);
 
   // --- level management ---
   bool selectLevel(int index);
