@@ -203,6 +203,13 @@ bool GameEngine::init(const GameOptions& opts) {
     enterScreen(ScreenState::InGame);
     confirmAction_ = ConfirmAction::RestartEpisode;
     confirmText_ = "Вы действительно хотите начать съемки заново?";
+  } else if (scr == "exit_modal" || scr == "exitmodal") {
+    enterScreen(ScreenState::InGame);
+    woody_.room = "anc";
+    woody_.pos = Point{100, 420};
+    confirmAction_ = ConfirmAction::ExitEpisode;
+    confirmText_ = level_.getString("exitlevel", "content");
+    if (confirmText_.empty()) confirmText_ = "Вы действительно готовы завершить серию?";
   } else if (scr == "test_decline") {
     enterScreen(ScreenState::InGame);
     for (size_t i = 0; i < level_.objects.size(); ++i) {
