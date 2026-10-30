@@ -608,6 +608,12 @@ bool GameEngine::selectLevel(int index) {
   catchesCount_ = 0;
   neighborChasing_ = false;
   neighborAlertTicks_ = 0;
+  camInitialized_ = false;
+  pets_.clear();
+  interruptedRoutineIdx_ = -1;
+  currentRoutineIdx_ = 0;
+  lookBubbleTicks_ = 0;
+  lookBubbleText_.clear();
 
   // Initialize actors from spawns
   woody_ = ActorState{"woody", "fro", Point{110, 218}, 4, 2, false, -1, "ms2", "ms2", 0};
@@ -663,6 +669,17 @@ bool GameEngine::selectLevel(int index) {
       neighbor_.pos = sp.position;
       neighbor_.layer = sp.layer;
       hasNeighbor = true;
+    } else {
+      ActorState pet;
+      pet.name = sp.name;
+      pet.room = sp.room;
+      pet.pos = sp.position;
+      pet.layer = sp.layer;
+      pet.facing = 2;
+      pet.currentAnim = "sleep";
+      pet.nextAnim = "sleep";
+      pet.animFrame = 0;
+      pets_.push_back(std::move(pet));
     }
   }
   if (!hasNeighbor) neighbor_.hidden = true;  // tutorial_1 has HAL instead of neighbor
@@ -957,15 +974,25 @@ const CombinationDef* GameEngine::findCombination(const std::string& targetName,
 // Player interaction & Hover
 // ---------------------------------------------------------------------------
 
+float GameEngine::getHudScale() const {
+  float s = std::min(float(winW_) / 800.0f, float(winH_) / 480.0f);
+  if (fullscreen_) s *= 0.90f;
+  return s;
+}
+
 void GameEngine::updateHover(int worldX, int worldY, int screenX, int screenY) {
   hoveredObject_ = -1;
   hoveredRoom_.clear();
   hoverText_.clear();
+  if (neighborChasing_ || catchSequenceActive_) {
+    cursorVpath_ = "gfx/cursor/camera.tga";
+    return;
+  }
   cursorVpath_ = "gfx/cursor/normal.tga";
   if (screen_ != ScreenState::InGame) return;
 
   // Check if mouse is over bottom HUD
-  const float hudScale = std::min(float(winW_) / 800.0f, float(winH_) / 480.0f);
+  const float hudScale = getHudScale();
   const float hudX = (float(winW_) - 800.0f * hudScale) * 0.5f;
   const float hudY = float(winH_) - 600.0f * hudScale;
   if (screenY >= winH_ - int(134 * hudScale)) {
@@ -1014,7 +1041,7 @@ void GameEngine::updateHover(int worldX, int worldY, int screenX, int screenY) {
   int bestLayer = -1;
   for (int i = (int)level_.objects.size() - 1; i >= 0; --i) {
     const PlacedObject& po = level_.objects[i];
-    if (!po.visible || toLowerAscii(po.name) == "house") continue;
+    if (!po.visible || po.currentAnim == "inv" || toLowerAscii(po.currentAnim) == "empty" || toLowerAscii(po.name) == "house") continue;
     Rect hb = objectWorldHitbox(po);
     if (hb.contains(worldX, worldY) && po.layer >= bestLayer) {
       bestLayer = po.layer;
@@ -1022,8 +1049,9 @@ void GameEngine::updateHover(int worldX, int worldY, int screenX, int screenY) {
     }
   }
 
-  // Hit-test room floors
+  // Hit-test room floors (ignore porch fro so Woody does not wander outside)
   for (const RoomDef& r : level_.rooms) {
+    if (toLowerAscii(r.name) == "fro") continue;
     for (const FloorRect& fl : r.floors) {
       Rect wr{r.offset.x + fl.rect.x, r.offset.y + fl.rect.y, fl.rect.w, fl.rect.h};
       if (wr.contains(worldX, worldY)) {
@@ -1204,11 +1232,79 @@ void GameEngine::queuePathToRoom(const std::string& destRoom, bool sneak) {
   }
 }
 
+void GameEngine::queueNeighborToRoom(const std::string& destRoom, Point destPos) {
+  std::string curRoom = neighbor_.room;
+  Point curPos = neighbor_.pos;
+  for (const TaskStep& st : neighborQueue_) {
+    if (st.type == TaskStep::Type::TraverseDoor && !st.targetRoom.empty()) {
+      curRoom = st.targetRoom;
+      curPos = st.outPos;
+    } else if (st.type == TaskStep::Type::WalkToX) {
+      curPos.x = st.targetX;
+      if (st.targetY > 0) curPos.y = st.targetY;
+    }
+  }
+  for (const RoomEdge& e : findRoomPath(curRoom, destRoom)) {
+    const ObjectDef* dIn = level_.findObjectDef(e.doorIn);
+    const ObjectDef* dOut = level_.findObjectDef(e.doorOut);
+    int inIdx = findObjectIndex(e.doorIn, curRoom);
+    int outIdx = findObjectIndex(e.doorOut, e.targetRoom);
+    Point inPos = dIn ? dIn->hotspotOr("neighbor", Point{450, 420}) : Point{450, 420};
+    if (inIdx >= 0) {
+      inPos.x += level_.objects[inIdx].position.x;
+      inPos.y += level_.objects[inIdx].position.y;
+    }
+    Point outPos = dOut ? dOut->hotspotOr("neighbor_out", dOut->hotspotOr("neighbor", Point{450, 420})) : Point{450, 420};
+    if (outIdx >= 0) {
+      outPos.x += level_.objects[outIdx].position.x;
+      outPos.y += level_.objects[outIdx].position.y;
+    }
+    if (const RoomDef* rOut = level_.findRoom(e.targetRoom)) {
+      int lo = std::min(rOut->path1.x, rOut->path2.x);
+      int hi = std::max(rOut->path1.x, rOut->path2.x);
+      if (hi > lo) outPos.x = std::clamp(outPos.x, lo, hi);
+    }
+
+    enqueueRoomWalk(neighborQueue_, curRoom, curPos, inPos, false);
+
+    TaskStep doorStep{};
+    doorStep.type = TaskStep::Type::TraverseDoor;
+    doorStep.doorName = e.doorIn;
+    doorStep.objectIndex = inIdx;
+    doorStep.outObjectIndex = outIdx;
+    doorStep.targetRoom = e.targetRoom;
+    doorStep.outPos = outPos;
+    doorStep.outAnim = "ms2";
+    int enterFrames = dIn ? animFrameCount(dIn->gfx, "neighbor_enter", 12) : 12;
+    int leaveFrames = dOut ? animFrameCount(dOut->gfx, "neighbor_leave", 23) : 23;
+    if (dIn) {
+      if (const ActionDef* aEn = dIn->findAction("enter", "neighbor")) {
+        if (aEn->timeTicks > 0) enterFrames = std::max(enterFrames, aEn->timeTicks);
+      }
+    }
+    if (dOut) {
+      if (const ActionDef* aLv = dOut->findAction("leave", "neighbor")) {
+        if (!aLv->actorNextAnim.empty()) doorStep.outAnim = aLv->actorNextAnim;
+        if (aLv->timeTicks > 0) leaveFrames = std::max(leaveFrames, aLv->timeTicks);
+      }
+    }
+    doorStep.enterTicks = std::max(1, enterFrames);
+    doorStep.totalTicks = std::max(doorStep.enterTicks, leaveFrames);
+    neighborQueue_.push_back(doorStep);
+
+    curRoom = e.targetRoom;
+    curPos = outPos;
+  }
+  if (destPos.x >= 0) {
+    enqueueRoomWalk(neighborQueue_, curRoom, curPos, destPos, false);
+  }
+}
+
 void GameEngine::onLeftClick(int worldX, int worldY, int screenX, int screenY, bool doubleClick) {
   if (catchSequenceActive_ || neighborChasing_) return;
 
   // Check HUD clicks first
-  const float hudScale = std::min(float(winW_) / 800.0f, float(winH_) / 480.0f);
+  const float hudScale = getHudScale();
   const float hudX = (float(winW_) - 800.0f * hudScale) * 0.5f;
   const float hudY = float(winH_) - 600.0f * hudScale;
   if (screenY >= winH_ - int(134 * hudScale)) {
@@ -1445,6 +1541,7 @@ void GameEngine::onLeftClick(int worldX, int worldY, int screenX, int screenY, b
 }
 
 void GameEngine::onRightClick(int worldX, int worldY, int screenX, int screenY) {
+  if (catchSequenceActive_ || neighborChasing_) return;
   if (selectedInv_ >= 0) {
     selectedInv_ = -1;
     return;
@@ -1511,7 +1608,12 @@ void GameEngine::advanceActorAnim(ActorState& a, bool* finishedOut) {
     if (anim.loop) {
       a.animFrame = 0;
     } else {
-      a.animFrame = (int)anim.frames.size() - 1;
+      if (!a.nextAnim.empty() && a.nextAnim != a.currentAnim) {
+        a.currentAnim = a.nextAnim;
+        a.animFrame = 0;
+      } else {
+        a.animFrame = (int)anim.frames.size() - 1;
+      }
       if (finishedOut) *finishedOut = true;
     }
   }
@@ -1851,8 +1953,10 @@ void GameEngine::updateWoody() {
             stClose.objectIndex = idx;
             stClose.actorAnim = closeActorAnim.empty() ? "close" : closeActorAnim;
             stClose.actorNextAnim = finalNextAnim;
-            stClose.objAnim = "ms";
-            stClose.objNextAnim = "ms";
+            const GfxObjectDef* gd = level_.findGfxObject(od ? od->gfx : po.name);
+            bool hasEmptyAnim = (gd && gd->anims.count("empty") > 0);
+            stClose.objAnim = (po.items.empty() && hasEmptyAnim) ? "empty" : "ms";
+            stClose.objNextAnim = (po.items.empty() && hasEmptyAnim) ? "empty" : "ms";
             stClose.durationTicks = animFrameCount("woody", stClose.actorAnim, 10);
             seq.push_back(stClose);
           }
@@ -1863,6 +1967,9 @@ void GameEngine::updateWoody() {
           if (!desc.empty()) {
             statusBanner_ = desc;
             bannerTicks_ = kTicksPerSecond * 3;
+            lookBubbleText_ = desc;
+            lookBubbleTicks_ = kTicksPerSecond * 4;
+            lookBubblePos_ = Point{woody_.pos.x, woody_.pos.y};
           }
           TaskStep lookStep{};
           lookStep.type = TaskStep::Type::PlayAction;
@@ -2096,16 +2203,37 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
   if (lowerName == "bed/bed") {
     int cactusIdx = findObjectIndex("bed/cactusclock", po.roomName);
     int alarmIdx = (cactusIdx >= 0) ? cactusIdx : findObjectIndex("bed/alarmclock", po.roomName);
-    pushStep(objIdx, "inv", "inv", "enter", "sleep", 12);
-    pushStep(objIdx, "inv", "inv", "sleep", "sleep", 36);
+    int enterFrames = animFrameCount("bed/bed", "enter", 19);
+    int sleepFrames = 299;  // authentic duration from level_pig/objects.xml
+    pushStep(objIdx, "inv", "inv", "enter", "sleep", enterFrames);
+    pushStep(objIdx, "inv", "inv", "sleep", "sleep", sleepFrames);
     if (cactusIdx >= 0) {
       auto cTrick = level_.tricks.find("bed/cactusclock");
-      pushStep(objIdx, "inv", "inv", "hit_cactus", "leave", 36, "",
+      pushStep(objIdx, "inv", "inv", "hit_cactus", "leave", animFrameCount("bed/bed", "hit_cactus", 36), "",
                cTrick != level_.tricks.end(), cTrick != level_.tricks.end() ? &cTrick->second : nullptr, cactusIdx);
     } else {
-      pushStep(objIdx, "inv", "inv", "hit_alarm", "leave", 24, "", false, nullptr, alarmIdx);
+      pushStep(objIdx, "inv", "inv", "hit_alarm", "leave", animFrameCount("bed/bed", "hit_alarm", 24), "", false, nullptr, alarmIdx);
     }
-    pushStep(objIdx, "inv", "ms1", "leave", "ms", 18);
+    pushStep(objIdx, "inv", "ms1", "leave", "ms", animFrameCount("bed/bed", "leave", 20));
+    return;
+  }
+
+  // Birthday cake sequence on level_mail (candle vs TNT)
+  if (lowerName == "kit/cake") {
+    int boxBoomIdx = findObjectIndex("kit/candlebox_boom", po.roomName);
+    bool hasTnt = (boxBoomIdx >= 0 && level_.objects[boxBoomIdx].items.empty());
+    if (hasTnt) {
+      pushStep(objIdx, "give1", "give1", "ms", "candle_boom", 14);
+      pushStep(objIdx, "give1", "ms1", "candle_boom", "boom", 18);
+      auto cTrick = level_.tricks.find("kit/candlebox_boom");
+      pushStep(objIdx, "celebrate_boom", "ms1", "boom", "dead", animFrameCount("neighbor", "celebrate_boom", 45), "",
+               cTrick != level_.tricks.end(), cTrick != level_.tricks.end() ? &cTrick->second : nullptr);
+    } else {
+      pushStep(objIdx, "give1", "give1", "ms", "candle", 14);
+      pushStep(objIdx, "give1", "ms1", "candle", "candle_lit", 18);
+      pushStep(objIdx, "celebrate", "ms1", "candle_lit", "candle_lit", animFrameCount("neighbor", "celebrate", 42));
+      pushStep(objIdx, "give1", "ms1", "candle_lit", "ms", 16);
+    }
     return;
   }
 
@@ -2553,6 +2681,7 @@ void GameEngine::updateNeighbor() {
         hs.x += po.position.x;
         hs.y += po.position.y;
         if (std::abs(neighbor_.pos.x - hs.x) <= 75) {
+          interruptedRoutineIdx_ = currentRoutineIdx_;
           neighborQueue_.clear();
           Point curPos = neighbor_.pos;
           enqueueRoomWalk(neighborQueue_, neighbor_.room, curPos, hs, false);
@@ -2764,9 +2893,14 @@ void GameEngine::updateNeighbor() {
 
   // Plan next routine stop
   if (routine_.empty()) return;
+  if (interruptedRoutineIdx_ >= 0 && interruptedRoutineIdx_ < (int)routine_.size()) {
+    routineIdx_ = interruptedRoutineIdx_;
+    interruptedRoutineIdx_ = -1;
+  }
   int targetObjIdx = -1;
   const RoutineStop* chosenStop = nullptr;
   for (size_t attempt = 0; attempt < routine_.size(); ++attempt) {
+    currentRoutineIdx_ = routineIdx_;
     const RoutineStop& st = routine_[routineIdx_];
     routineIdx_ = (routineIdx_ + 1) % (int)routine_.size();
     if (st.onlyWhenTricked) {
@@ -2796,68 +2930,13 @@ void GameEngine::updateNeighbor() {
   if (targetObjIdx < 0 || !chosenStop) return;
   if (!chosenStop->iconName.empty()) currentBubbleIcon_ = chosenStop->iconName;
 
-  // Enqueue room path for Neighbor with 2.5D walk lines and synchronized door animations
-  std::string curRoom = neighbor_.room;
-  Point curPos = neighbor_.pos;
-  for (const RoomEdge& e : findRoomPath(curRoom, chosenStop->room)) {
-    const ObjectDef* dIn = level_.findObjectDef(e.doorIn);
-    const ObjectDef* dOut = level_.findObjectDef(e.doorOut);
-    int inIdx = findObjectIndex(e.doorIn, curRoom);
-    int outIdx = findObjectIndex(e.doorOut, e.targetRoom);
-    Point inPos = dIn ? dIn->hotspotOr("neighbor", Point{450, 420}) : Point{450, 420};
-    if (inIdx >= 0) {
-      inPos.x += level_.objects[inIdx].position.x;
-      inPos.y += level_.objects[inIdx].position.y;
-    }
-    Point outPos = dOut ? dOut->hotspotOr("neighbor_out", dOut->hotspotOr("neighbor", Point{450, 420})) : Point{450, 420};
-    if (outIdx >= 0) {
-      outPos.x += level_.objects[outIdx].position.x;
-      outPos.y += level_.objects[outIdx].position.y;
-    }
-    if (const RoomDef* rOut = level_.findRoom(e.targetRoom)) {
-      int lo = std::min(rOut->path1.x, rOut->path2.x);
-      int hi = std::max(rOut->path1.x, rOut->path2.x);
-      if (hi > lo) outPos.x = std::clamp(outPos.x, lo, hi);
-    }
-
-    enqueueRoomWalk(neighborQueue_, curRoom, curPos, inPos, false);
-
-    TaskStep doorStep{};
-    doorStep.type = TaskStep::Type::TraverseDoor;
-    doorStep.doorName = e.doorIn;
-    doorStep.objectIndex = inIdx;
-    doorStep.outObjectIndex = outIdx;
-    doorStep.targetRoom = e.targetRoom;
-    doorStep.outPos = outPos;
-    doorStep.outAnim = "ms2";
-    int enterFrames = dIn ? animFrameCount(dIn->gfx, "neighbor_enter", 12) : 12;
-    int leaveFrames = dOut ? animFrameCount(dOut->gfx, "neighbor_leave", 23) : 23;
-    if (dIn) {
-      if (const ActionDef* aEn = dIn->findAction("enter", "neighbor")) {
-        if (aEn->timeTicks > 0) enterFrames = std::max(enterFrames, aEn->timeTicks);
-      }
-    }
-    if (dOut) {
-      if (const ActionDef* aLv = dOut->findAction("leave", "neighbor")) {
-        if (!aLv->actorNextAnim.empty()) doorStep.outAnim = aLv->actorNextAnim;
-        if (aLv->timeTicks > 0) leaveFrames = std::max(leaveFrames, aLv->timeTicks);
-      }
-    }
-    doorStep.enterTicks = std::max(1, enterFrames);
-    doorStep.totalTicks = std::max(doorStep.enterTicks, leaveFrames);
-    neighborQueue_.push_back(doorStep);
-
-    curRoom = e.targetRoom;
-    curPos = outPos;
-  }
-
   const PlacedObject& targetPo = level_.objects[targetObjIdx];
   const ObjectDef* targetOd = level_.findObjectDef(targetPo.name);
   Point hs = targetOd ? targetOd->hotspotOr("neighbor", Point{450, 420}) : Point{450, 420};
   hs.x += targetPo.position.x;
   hs.y += targetPo.position.y;
 
-  enqueueRoomWalk(neighborQueue_, curRoom, curPos, hs, false);
+  queueNeighborToRoom(chosenStop->room, hs);
 
   TaskStep inter{};
   inter.type = TaskStep::Type::InteractObject;
@@ -2878,6 +2957,42 @@ void GameEngine::checkStealthDetection() {
       return;
     }
     return;
+  }
+
+  for (ActorState& pet : pets_) {
+    advanceActorAnim(pet);
+    if (woody_.hidden) continue;
+    if (toLowerAscii(woody_.room) == toLowerAscii(pet.room)) {
+      int dist = std::abs(woody_.pos.x - pet.pos.x);
+      bool woodyRunning = (!woodyQueue_.empty() && woodyQueue_.front().type == TaskStep::Type::WalkToX && !woodyQueue_.front().sneak);
+      if (woodyRunning || dist < 110) {
+        if (pet.currentAnim != "bark1" && pet.currentAnim != "wakeup") {
+          pet.currentAnim = "wakeup";
+          pet.nextAnim = "bark1";
+          pet.animFrame = 0;
+          bool isDog = (pet.name.find("dog") != std::string::npos);
+          playSfx(isDog ? "sfx/dog_wakeup1.wav" : "sfx/ch_wakeup1.wav");
+          playSfx(isDog ? "sfx/dog_bark1.wav" : "sfx/ch_bark1.wav");
+          if (!neighborChasing_ && !catchSequenceActive_) {
+            interruptedRoutineIdx_ = currentRoutineIdx_;
+            neighborQueue_.clear();
+            queueNeighborToRoom(pet.room, Point{pet.pos.x, 420});
+          }
+        }
+      } else {
+        if (pet.currentAnim == "bark1") {
+          pet.currentAnim = "fallasleep";
+          pet.nextAnim = "sleep";
+          pet.animFrame = 0;
+        }
+      }
+    } else {
+      if (pet.currentAnim == "bark1") {
+        pet.currentAnim = "fallasleep";
+        pet.nextAnim = "sleep";
+        pet.animFrame = 0;
+      }
+    }
   }
 
   bool woodyInTransition = woody_.hidden ||
@@ -3086,7 +3201,7 @@ bool GameEngine::drawMenuButton(const std::string& stdImg, const std::string& ho
 }
 
 void GameEngine::renderObject(const PlacedObject& po) {
-  if (!po.visible || po.currentAnim == "inv" || toLowerAscii(po.name) == "house") return;
+  if (!po.visible || po.currentAnim == "inv" || toLowerAscii(po.currentAnim) == "empty" || toLowerAscii(po.name) == "house") return;
   const RoomDef* r = level_.findRoom(po.roomName);
   const Point base{po.position.x + (r ? r->offset.x : 0), po.position.y + (r ? r->offset.y : 0)};
 
@@ -3097,6 +3212,7 @@ void GameEngine::renderObject(const PlacedObject& po) {
 
   auto it = gd->anims.find(toLowerAscii(po.currentAnim));
   if (it == gd->anims.end() || it->second.frames.empty()) {
+    if (toLowerAscii(po.currentAnim) == "empty") return;
     it = gd->anims.find("ms");
     if (it == gd->anims.end() || it->second.frames.empty()) return;
   }
@@ -3173,9 +3289,26 @@ void GameEngine::renderActor(const ActorState& a) {
   }
 }
 
+void GameEngine::resetCameraOnWoody() {
+  const float hudScale = getHudScale();
+  const int hudHeight = int(134 * hudScale);
+  const int availH = std::max(200, winH_ - hudHeight);
+  camZoom_ = std::max(1.0f, float(winW_) / 950.0f);
+  if (const RoomDef* wr = level_.findRoom(woody_.room)) {
+    camX_ = winW_ * 0.5f - (wr->offset.x + woody_.pos.x) * camZoom_;
+    camY_ = availH * 0.5f - (wr->offset.y + woody_.pos.y - 80) * camZoom_;
+    float houseW = float(level_.size.x) * camZoom_;
+    float houseH = float(level_.size.y) * camZoom_;
+    if (houseW <= float(winW_)) camX_ = (float(winW_) - houseW) * 0.5f;
+    else camX_ = std::clamp(camX_, float(winW_) - houseW, 0.0f);
+    if (houseH <= float(availH)) camY_ = float(availH) - houseH;
+    else camY_ = std::clamp(camY_, float(availH) - houseH, 0.0f);
+  }
+}
+
 void GameEngine::renderWorld() {
   // Update camera placement
-  const float hudScale = std::min(float(winW_) / 800.0f, float(winH_) / 480.0f);
+  const float hudScale = getHudScale();
   const int hudHeight = int(134 * hudScale);
   const int availH = std::max(200, winH_ - hudHeight);
   if (fullHouseView_) {
@@ -3186,50 +3319,22 @@ void GameEngine::renderWorld() {
     camY_ = float(availH) - level_.size.y * camZoom_;
   } else {
     camZoom_ = std::max(1.0f, float(winW_) / 950.0f);
+    if (!camInitialized_) {
+      resetCameraOnWoody();
+      camInitialized_ = true;
+    }
     if (!camDragging_) {
-      if (const RoomDef* wr = level_.findRoom(woody_.room)) {
-        float targetX = winW_ * 0.5f - (wr->offset.x + woody_.pos.x) * camZoom_;
-        float targetY = availH * 0.5f - (wr->offset.y + woody_.pos.y - 80) * camZoom_;
-
-        // Edge scrolling when mouse cursor approaches window edges
-        const int edgeMargin = 50;
-        const float scrollSpeed = 26.0f;
-        bool edgeScrolling = false;
-        if (screen_ == ScreenState::InGame && confirmAction_ == ConfirmAction::None) {
-          if (mouseX_ >= 0 && mouseX_ <= winW_ && mouseY_ >= 0 && mouseY_ <= winH_) {
-            if (mouseX_ < edgeMargin) {
-              camEdgeOffsetX_ += scrollSpeed;
-              edgeScrolling = true;
-            } else if (mouseX_ > winW_ - edgeMargin) {
-              camEdgeOffsetX_ -= scrollSpeed;
-              edgeScrolling = true;
-            }
-            if (mouseY_ < edgeMargin) {
-              camEdgeOffsetY_ += scrollSpeed;
-              edgeScrolling = true;
-            } else if (mouseY_ > winH_ - edgeMargin || mouseY_ > availH - edgeMargin) {
-              camEdgeOffsetY_ -= scrollSpeed;
-              edgeScrolling = true;
-            }
-          }
+      // Free camera edge scrolling with 10% margins; down-scroll only at true window bottom
+      const float edgeMarginX = float(winW_) * 0.10f;
+      const float edgeMarginY = float(winH_) * 0.10f;
+      const float scrollSpeed = 22.0f;
+      if (screen_ == ScreenState::InGame && confirmAction_ == ConfirmAction::None) {
+        if (mouseX_ >= 0 && mouseX_ <= winW_ && mouseY_ >= 0 && mouseY_ <= winH_) {
+          if (float(mouseX_) < edgeMarginX) camX_ += scrollSpeed;
+          else if (float(mouseX_) > float(winW_) - edgeMarginX) camX_ -= scrollSpeed;
+          if (float(mouseY_) < edgeMarginY) camY_ += scrollSpeed;
+          else if (float(mouseY_) > float(winH_) - edgeMarginY) camY_ -= scrollSpeed;
         }
-        if (!edgeScrolling) {
-          camEdgeOffsetX_ *= 0.90f;
-          camEdgeOffsetY_ *= 0.90f;
-          if (std::abs(camEdgeOffsetX_) < 0.5f) camEdgeOffsetX_ = 0.0f;
-          if (std::abs(camEdgeOffsetY_) < 0.5f) camEdgeOffsetY_ = 0.0f;
-        } else {
-          float maxScrollX = float(level_.size.x) * camZoom_;
-          float maxScrollY = float(level_.size.y) * camZoom_;
-          camEdgeOffsetX_ = std::clamp(camEdgeOffsetX_, -maxScrollX, maxScrollX);
-          camEdgeOffsetY_ = std::clamp(camEdgeOffsetY_, -maxScrollY, maxScrollY);
-        }
-
-        targetX += camEdgeOffsetX_;
-        targetY += camEdgeOffsetY_;
-
-        camX_ += (targetX - camX_) * 0.15f;
-        camY_ += (targetY - camY_) * 0.15f;
       }
     }
     float houseW = float(level_.size.x) * camZoom_;
@@ -3267,9 +3372,56 @@ void GameEngine::renderWorld() {
     SDL_RenderDrawRectF(ren_, &sr);
   }
 
-  // Layer 4: Actors
+  // Layer 4: Actors (pets, neighbor, woody)
+  for (const ActorState& pet : pets_) {
+    renderActor(pet);
+  }
   renderActor(neighbor_);
   renderActor(woody_);
+
+  // Thought bubble for "to look"
+  if (lookBubbleTicks_ > 0 && !lookBubbleText_.empty()) {
+    lookBubbleTicks_--;
+    if (const RoomDef* wr = level_.findRoom(woody_.room)) {
+      float wx = float(wr->offset.x + lookBubblePos_.x);
+      float wy = float(wr->offset.y + lookBubblePos_.y - 140);
+      SDL_FRect sp = worldToScreen(wx, wy, 1.0f, 1.0f);
+
+      const float bubbleScale = hudScale;
+      const float bW = 200.0f * bubbleScale;
+      int charsPerLine = std::max(16, int(22 * bubbleScale));
+      int lineCount = std::max(1, (int(lookBubbleText_.size()) + charsPerLine - 1) / charsPerLine);
+      float textH = std::clamp(float(lineCount * 18) * bubbleScale, 20.0f * bubbleScale, 90.0f * bubbleScale);
+      float totalH = (21.0f + 21.0f + 24.0f) * bubbleScale + textH;
+      float bX = std::clamp(sp.x - bW * 0.5f, 10.0f, float(winW_) - bW - 10.0f);
+      float bY = sp.y - totalH;
+
+      const TexEntry* tTop = getTexture("gfx/gui/ingame/textbubble_top.tga");
+      const TexEntry* tMid = getTexture("gfx/gui/ingame/textbubble_center.tga");
+      const TexEntry* tBot = getTexture("gfx/gui/ingame/textbubble_bottom.tga");
+      const TexEntry* tSpitz = getTexture("gfx/gui/ingame/textbubble_spitz.tga");
+
+      if (tTop) {
+        SDL_FRect rTop{bX, bY, bW, 21.0f * bubbleScale};
+        SDL_RenderCopyF(ren_, tTop->tex, nullptr, &rTop);
+      }
+      if (tMid) {
+        SDL_FRect rMid{bX, bY + 21.0f * bubbleScale, bW, textH};
+        SDL_RenderCopyF(ren_, tMid->tex, nullptr, &rMid);
+      }
+      if (tBot) {
+        SDL_FRect rBot{bX, bY + 21.0f * bubbleScale + textH, bW, 21.0f * bubbleScale};
+        SDL_RenderCopyF(ren_, tBot->tex, nullptr, &rBot);
+      }
+      if (tSpitz) {
+        SDL_FRect rSpitz{bX, bY + (21.0f + 21.0f) * bubbleScale + textH, bW, 24.0f * bubbleScale};
+        SDL_RenderCopyF(ren_, tSpitz->tex, nullptr, &rSpitz);
+      }
+      SDL_Rect textRect{int(bX + 16.0f * bubbleScale), int(bY + 14.0f * bubbleScale),
+                        int(bW - 32.0f * bubbleScale), int(textH + 14.0f * bubbleScale)};
+      fontSmall_.drawWrapped(lookBubbleText_, textRect, SDL_Color{20, 20, 20, 255}, 0, 0, bubbleScale);
+    }
+  }
 
   if (showDebug_) {
     for (const PlacedObject& po : level_.objects) {
@@ -3283,7 +3435,7 @@ void GameEngine::renderWorld() {
 }
 
 void GameEngine::renderHud() {
-  const float hudScale = std::min(float(winW_) / 800.0f, float(winH_) / 480.0f);
+  const float hudScale = getHudScale();
   const float hudW = 800.0f * hudScale;
   const float hudH = 600.0f * hudScale;
   const float hudX = (float(winW_) - hudW) * 0.5f;
@@ -3407,7 +3559,7 @@ void GameEngine::renderHud() {
 
       SDL_Rect textRect{int(bX + 16.0f * hudScale), int(bY + 14.0f * hudScale),
                         int(bW - 32.0f * hudScale), int(textH + 14.0f * hudScale)};
-      fontSmall_.drawWrapped(desc, textRect, SDL_Color{20, 20, 20, 255}, 0, 0);
+      fontSmall_.drawWrapped(desc, textRect, SDL_Color{20, 20, 20, 255}, 0, 0, hudScale);
     }
   }
 
@@ -4394,6 +4546,25 @@ int GameEngine::run() {
             case SDLK_RIGHTBRACKET:
             case SDLK_F2:
               selectLevel(currentLevelIdx_ + 1);
+              break;
+            case SDLK_w:
+            case SDLK_UP:
+              if (screen_ == ScreenState::InGame) camY_ += 40.0f;
+              break;
+            case SDLK_s:
+            case SDLK_DOWN:
+              if (screen_ == ScreenState::InGame) camY_ -= 40.0f;
+              break;
+            case SDLK_a:
+            case SDLK_LEFT:
+              if (screen_ == ScreenState::InGame) camX_ += 40.0f;
+              break;
+            case SDLK_d:
+            case SDLK_RIGHT:
+              if (screen_ == ScreenState::InGame) camX_ -= 40.0f;
+              break;
+            case SDLK_c:
+              if (screen_ == ScreenState::InGame) resetCameraOnWoody();
               break;
             default:
               break;

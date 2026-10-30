@@ -145,7 +145,7 @@ void TextRenderer::drawAlignedScaled(const std::string& s, const SDL_FRect& box,
   SDL_RenderCopyF(r_, e->tex, nullptr, &dst);
 }
 
-void TextRenderer::drawWrapped(const std::string& s, const SDL_Rect& box, SDL_Color c, int halign, int valign) {
+void TextRenderer::drawWrapped(const std::string& s, const SDL_Rect& box, SDL_Color c, int halign, int valign, float scale) {
   if (!font_ || s.empty() || box.w <= 0 || box.h <= 0) return;
   std::vector<std::string> lines;
   size_t pos = 0;
@@ -173,7 +173,7 @@ void TextRenderer::drawWrapped(const std::string& s, const SDL_Rect& box, SDL_Co
         size_t wend = para.find(' ', wpos);
         std::string word = (wend == std::string::npos) ? para.substr(wpos) : para.substr(wpos, wend - wpos);
         std::string candidate = curLine.empty() ? word : (curLine + " " + word);
-        if (!curLine.empty() && width(candidate) > box.w) {
+        if (!curLine.empty() && float(width(candidate)) * scale > float(box.w)) {
           lines.push_back(curLine);
           curLine = word;
         } else {
@@ -189,7 +189,7 @@ void TextRenderer::drawWrapped(const std::string& s, const SDL_Rect& box, SDL_Co
     pos = nl + 1;
   }
 
-  int lh = std::max(14, lineHeight());
+  int lh = std::max(int(14.0f * scale), int(float(lineHeight()) * scale));
   int totalH = (int)lines.size() * lh;
   int startY = box.y;
   if (valign == 0) startY = box.y + std::max(0, (box.h - totalH) / 2);
@@ -197,10 +197,10 @@ void TextRenderer::drawWrapped(const std::string& s, const SDL_Rect& box, SDL_Co
 
   for (size_t i = 0; i < lines.size(); ++i) {
     int y = startY + (int)i * lh;
-    if (y + lh > box.y + box.h + 4) break;
+    if (y + lh > box.y + box.h + int(8.0f * scale)) break;
     if (lines[i].empty()) continue;
     SDL_Rect lineBox{box.x, y, box.w, lh};
-    drawAligned(lines[i], lineBox, c, halign, -1);
+    drawAligned(lines[i], lineBox, c, halign, -1, scale);
   }
 }
 

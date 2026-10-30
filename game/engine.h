@@ -190,8 +190,10 @@ class GameEngine {
   void onRightClick(int worldX, int worldY, int screenX, int screenY);
   void onMenuClick(Point mp, bool doubleClick);
   void queuePathToRoom(const std::string& destRoom, bool sneak);
+  void queueNeighborToRoom(const std::string& destRoom, Point destPos = Point{-1, -1});
   const CombinationDef* findCombination(const std::string& targetName, const std::string& itemName) const;
   void toggleFullscreen();
+  float getHudScale() const;
 
   // --- rendering ---
   void render();
@@ -290,19 +292,29 @@ class GameEngine {
   float camX_ = 0.0f, camY_ = 0.0f;
   float camZoom_ = 1.0f;
   bool camDragging_ = false;
+  bool camInitialized_ = false;
   float camEdgeOffsetX_ = 0.0f, camEdgeOffsetY_ = 0.0f;
+  void resetCameraOnWoody();
 
   // Game state
   ActorState woody_;
   ActorState neighbor_;
+  std::vector<ActorState> pets_;
   std::deque<TaskStep> woodyQueue_;
   bool woodyBusyInAnim_ = false;
   int woodyActionTicks_ = 0;
   int woodyActionTotalTicks_ = 0;
 
+  // Thought bubble for "look"
+  std::string lookBubbleText_;
+  int lookBubbleTicks_ = 0;
+  Point lookBubblePos_;
+
   // Neighbor AI state
   std::vector<RoutineStop> routine_;
   int routineIdx_ = 0;
+  int currentRoutineIdx_ = 0;
+  int interruptedRoutineIdx_ = -1;
   std::deque<TaskStep> neighborQueue_;
   bool neighborBusyInAnim_ = false;
   int neighborWaitTicks_ = 20;

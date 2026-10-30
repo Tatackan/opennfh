@@ -33,7 +33,7 @@ class TextRenderer {
   // halign: -1=left, 0=center, 1=right; valign: -1=top, 0=center, 1=bottom
   void drawAligned(const std::string& s, const SDL_Rect& box, SDL_Color c, int halign = 0, int valign = 0, float scale = 1.0f);
   void drawAlignedScaled(const std::string& s, const SDL_FRect& box, SDL_Color c, float scale, int halign = 0, int valign = 0);
-  void drawWrapped(const std::string& s, const SDL_Rect& box, SDL_Color c, int halign = -1, int valign = -1);
+  void drawWrapped(const std::string& s, const SDL_Rect& box, SDL_Color c, int halign = -1, int valign = -1, float scale = 1.0f);
 
   void clearCache();
   void close();
