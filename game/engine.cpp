@@ -153,6 +153,18 @@ bool GameEngine::init(const GameOptions& opts) {
     completedSeason_ = 1;
     seasonTrophyTier_ = 3;
     enterScreen(ScreenState::SeasonVictory);
+  } else if (scr == "splash" || scr == "splash0" || scr == "loading0") {
+    loadingPhase_ = 0;
+    loadingTicks_ = 0;
+    enterScreen(ScreenState::LoadingSplash);
+  } else if (scr == "splash1" || scr == "loading1") {
+    loadingPhase_ = 1;
+    loadingTicks_ = 0;
+    enterScreen(ScreenState::LoadingSplash);
+  } else if (scr == "splash2" || scr == "loading" || scr == "loading2") {
+    loadingPhase_ = 2;
+    loadingTicks_ = 10;
+    enterScreen(ScreenState::LoadingSplash);
   } else if (scr == "confirm") {
     enterScreen(ScreenState::InGame);
     confirmAction_ = ConfirmAction::RestartEpisode;
@@ -180,8 +192,10 @@ bool GameEngine::init(const GameOptions& opts) {
     enterScreen(ScreenState::InGame);
     woodyActionTotalTicks_ = 100;
     woodyActionTicks_ = 27;
-  } else if (opts.startInLevel || !opts.screenshot.empty() || !opts.recordDir.empty()) {
+  } else if (!opts.screenshot.empty() || !opts.recordDir.empty()) {
     enterScreen(ScreenState::InGame);
+  } else if (opts.startInLevel) {
+    startLevelWithSplash(startIdx);
   } else {
     enterScreen(ScreenState::MainMenu);
   }
@@ -255,6 +269,15 @@ void GameEngine::startMusic(const std::string& musicVpath) {
       Mix_PlayMusic(music_, -1);
     }
   }
+}
+
+void GameEngine::stopMusic() {
+  if (music_) {
+    Mix_HaltMusic();
+    Mix_FreeMusic(music_);
+    music_ = nullptr;
+  }
+  currentMusicVpath_.clear();
 }
 
 void GameEngine::applyAudioVolumes() {
@@ -416,6 +439,18 @@ void GameEngine::resetUserProgress() {
   saveUserProgress();
 }
 
+void GameEngine::startLevelWithSplash(int levelIdx) {
+  selectLevel(levelIdx);
+  if (!opts_.screenshot.empty()) {
+    enterScreen(ScreenState::InGame);
+    return;
+  }
+  loadingPhase_ = 0;
+  loadingTicks_ = 0;
+  enterScreen(ScreenState::LoadingSplash);
+  playSfx("sfx/dog_bark1.wav");
+}
+
 void GameEngine::enterScreen(ScreenState st) {
   screen_ = st;
   confirmAction_ = ConfirmAction::None;
@@ -426,6 +461,8 @@ void GameEngine::enterScreen(ScreenState st) {
   if (st == ScreenState::MainMenu || st == ScreenState::EpisodeSelect || st == ScreenState::Options ||
       st == ScreenState::Credits) {
     startMusic("sfx/music/titel.mp3");
+  } else if (st == ScreenState::LoadingSplash) {
+    stopMusic();
   } else if (st == ScreenState::InGame) {
     std::string setLow = toLowerAscii(level_.info.setName);
     startMusic((setLow == "set02" || setLow == "set03") ? "sfx/music/ingame2_normal.mp3" : "sfx/music/ingame1_slow.mp3");
@@ -2866,6 +2903,26 @@ void GameEngine::tickSimulation() {
     return;
   }
 
+  if (screen_ == ScreenState::LoadingSplash) {
+    loadingTicks_++;
+    if (loadingPhase_ == 0) {
+      if (loadingTicks_ >= 34) {
+        loadingPhase_ = 1;
+        loadingTicks_ = 0;
+      }
+    } else if (loadingPhase_ == 1) {
+      if (loadingTicks_ >= 34) {
+        loadingPhase_ = 2;
+        loadingTicks_ = 0;
+      }
+    } else if (loadingPhase_ == 2) {
+      if (loadingTicks_ >= 38) {
+        enterScreen(ScreenState::InGame);
+      }
+    }
+    return;
+  }
+
   if (screen_ != ScreenState::InGame || paused_ || confirmAction_ != ConfirmAction::None) return;
   if (bannerTicks_ > 0) bannerTicks_--;
   if (angerTicks_ > 0) angerTicks_--;
@@ -3499,6 +3556,67 @@ void GameEngine::renderEpisodeSelect() {
   renderBriefingRightPanel(previewLevelIdx_, false);
 }
 
+void GameEngine::renderLoadingSplash() {
+  if (loadingPhase_ == 0) {
+    // 1. Studio Splash: JoWooD Productions präsentiert + sleeping dog
+    drawMenuImage("gfx/gui/main/splasher.tga", 0, 0);
+  } else if (loadingPhase_ == 1) {
+    // 2. Game Splash: Cinema theater screen with Woody & Neighbor watching game logo
+    drawMenuImage("gfx/gui/main/splasher1.tga", 0, 0);
+    const TexEntry* logo = getTexture("gfx/gui/logo/logo_main.tga");
+    if (logo) {
+      int lw = int(logo->w * 1.15f);
+      int lh = int(logo->h * 1.15f);
+      int lx = (800 - lw) / 2;
+      int ly = 190;
+      SDL_Rect dst = menuRect(lx, ly, lw, lh);
+      SDL_RenderCopy(ren_, logo->tex, nullptr, &dst);
+    }
+    fontSmall_.drawAligned("OpenNFH v0.2.0 (Buka / JoWooD 1.11)", menuRect(15, 565, 400, 25),
+                           SDL_Color{200, 200, 200, 220}, -1, 1);
+  } else {
+    // 3. Level Splash: Polaroid loading screen with episode briefing
+    drawMenuImage("gfx/loading.tga", 0, 0);
+
+    int lIdx = std::clamp(currentLevelIdx_, 0, (int)levels_.size() - 1);
+    const LevelInfo& li = levels_[lIdx];
+    const BriefingInfo& bi = (lIdx < (int)briefings_.size()) ? briefings_[lIdx] : BriefingInfo{};
+
+    // Episode title
+    std::string title = bi.title.empty() ? li.name : bi.title;
+    fontBig_.drawAligned(title, menuRect(30, 35, 740, 45), SDL_Color{255, 230, 130, 255}, 0, 0);
+
+    // Episode preview card
+    std::string previewPath = "gfx/gui/main/" + li.name + ".tga";
+    drawMenuImage(previewPath, 50, 110);
+
+    // Hint / Briefing text
+    if (!bi.hintText.empty()) {
+      fontUI_.drawAligned("Подсказка!", menuRect(250, 105, 500, 25), SDL_Color{255, 215, 0, 255}, -1, 0);
+      fontSmall_.drawWrapped(bi.hintText, menuRect(250, 130, 500, 60), SDL_Color{255, 255, 255, 255}, -1, 0);
+    }
+    if (!bi.briefing.empty()) {
+      fontSmall_.drawWrapped(bi.briefing, menuRect(250, 200, 500, 150), SDL_Color{230, 230, 230, 255}, -1, 0);
+    }
+
+    // Animated loading indicator
+    std::string loadStr = "Загрузка серии";
+    int dots = (loadingTicks_ / 6) % 4;
+    for (int i = 0; i < dots; ++i) loadStr += ".";
+    fontBig_.drawAligned(loadStr, menuRect(0, 515, 800, 40), SDL_Color{255, 255, 255, 255}, 0, 0);
+
+    // Progress bar frame
+    SDL_Rect barBg = menuRect(200, 560, 400, 14);
+    SDL_SetRenderDrawColor(ren_, 30, 30, 30, 220);
+    SDL_RenderFillRect(ren_, &barBg);
+
+    float frac = std::clamp(float(loadingTicks_) / 38.0f, 0.05f, 1.0f);
+    SDL_Rect barFg = menuRect(202, 562, int(396.0f * frac), 10);
+    SDL_SetRenderDrawColor(ren_, 245, 175, 40, 255);
+    SDL_RenderFillRect(ren_, &barFg);
+  }
+}
+
 void GameEngine::renderPauseMenu() {
   Point mp = screenToMenu(mouseX_, mouseY_);
   drawMenuImage("gfx/gui/main/ingamemenu_left.tga", 0, 0);
@@ -3793,8 +3911,7 @@ void GameEngine::onMenuClick(Point mp, bool doubleClick) {
       else if (act == ConfirmAction::ResetProgress) resetUserProgress();
       else if (act == ConfirmAction::AbortEpisode) enterScreen(ScreenState::MainMenu);
       else if (act == ConfirmAction::RestartEpisode) {
-        selectLevel(currentLevelIdx_);
-        enterScreen(ScreenState::InGame);
+        startLevelWithSplash(currentLevelIdx_);
       } else if (act == ConfirmAction::ExitEpisode) {
         finishEpisode(false, false);
       }
@@ -3835,8 +3952,7 @@ void GameEngine::onMenuClick(Point mp, bool doubleClick) {
           playSfx("sfx/but1.wav");
           previewLevelIdx_ = (int)i;
           if (doubleClick) {
-            selectLevel(previewLevelIdx_);
-            enterScreen(ScreenState::InGame);
+            startLevelWithSplash(previewLevelIdx_);
           }
           return;
         }
@@ -3850,8 +3966,7 @@ void GameEngine::onMenuClick(Point mp, bool doubleClick) {
       // Start Episode button ("Съемка")
       if (Rect{400 + 270, 480, 110, 95}.contains(mp.x, mp.y)) {
         playSfx("sfx/but1.wav");
-        selectLevel(previewLevelIdx_);
-        enterScreen(ScreenState::InGame);
+        startLevelWithSplash(previewLevelIdx_);
         return;
       }
       break;
@@ -3937,11 +4052,20 @@ void GameEngine::onMenuClick(Point mp, bool doubleClick) {
       break;
     }
 
+    case ScreenState::LoadingSplash: {
+      if (loadingPhase_ < 2) {
+        loadingPhase_++;
+        loadingTicks_ = 0;
+      } else {
+        enterScreen(ScreenState::InGame);
+      }
+      break;
+    }
+
     case ScreenState::LevelSummary: {
       if (Rect{125 + 190, 70 + 312, 115, 32}.contains(mp.x, mp.y)) {
         playSfx("sfx/but1.wav");
-        selectLevel(currentLevelIdx_);
-        enterScreen(ScreenState::InGame);
+        startLevelWithSplash(currentLevelIdx_);
       } else if (Rect{125 + 342, 70 + 312, 115, 32}.contains(mp.x, mp.y)) {
         playSfx("sfx/but1.wav");
         if (summarySuccess_ && currentLevelIdx_ + 1 < (int)levels_.size()) {
@@ -3999,6 +4123,9 @@ void GameEngine::render() {
       break;
     case ScreenState::EpisodeSelect:
       renderEpisodeSelect();
+      break;
+    case ScreenState::LoadingSplash:
+      renderLoadingSplash();
       break;
     case ScreenState::PauseMenu:
       renderPauseMenu();
@@ -4113,6 +4240,13 @@ int GameEngine::run() {
               } else if (screen_ == ScreenState::PauseMenu) {
                 playSfx("sfx/but1.wav");
                 enterScreen(ScreenState::InGame);
+              } else if (screen_ == ScreenState::LoadingSplash) {
+                if (loadingPhase_ < 2) {
+                  loadingPhase_++;
+                  loadingTicks_ = 0;
+                } else {
+                  enterScreen(ScreenState::InGame);
+                }
               } else if (screen_ == ScreenState::EpisodeSelect || screen_ == ScreenState::Credits) {
                 playSfx("sfx/but1.wav");
                 enterScreen(ScreenState::MainMenu);
@@ -4128,8 +4262,16 @@ int GameEngine::run() {
                                                                   : menuStrings_["reallyquit"];
               }
               break;
+            case SDLK_RETURN:
             case SDLK_SPACE:
-              if (screen_ == ScreenState::InGame) {
+              if (screen_ == ScreenState::LoadingSplash) {
+                if (loadingPhase_ < 2) {
+                  loadingPhase_++;
+                  loadingTicks_ = 0;
+                } else {
+                  enterScreen(ScreenState::InGame);
+                }
+              } else if (screen_ == ScreenState::InGame) {
                 paused_ = !paused_;
                 statusBanner_ = paused_ ? "ПАУЗА" : "Игра продолжается";
                 bannerTicks_ = kTicksPerSecond * 2;
@@ -4152,8 +4294,7 @@ int GameEngine::run() {
                 confirmText_ = menuStrings_["mm_restartlevel"].empty() ? "Вы действительно хотите начать съемки заново?"
                                                                        : menuStrings_["mm_restartlevel"];
               } else if (screen_ == ScreenState::LevelSummary) {
-                selectLevel(currentLevelIdx_);
-                enterScreen(ScreenState::InGame);
+                startLevelWithSplash(currentLevelIdx_);
               }
               break;
             case SDLK_F11:

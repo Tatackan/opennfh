@@ -34,6 +34,7 @@ class GameEngine {
   enum class ScreenState {
     MainMenu,
     EpisodeSelect,
+    LoadingSplash,
     InGame,
     PauseMenu,
     Options,
@@ -143,6 +144,7 @@ class GameEngine {
   void clearTextures();
   void playSfx(const std::string& sfxPath);
   void startMusic(const std::string& musicVpath);
+  void stopMusic();
   void applyAudioVolumes();
 
   // --- menu & profile data ---
@@ -199,6 +201,8 @@ class GameEngine {
   void renderHud();
   void renderMainMenu();
   void renderEpisodeSelect();
+  void renderLoadingSplash();
+  void startLevelWithSplash(int levelIdx);
   void renderPauseMenu();
   void renderBriefingRightPanel(int levelIdx, bool isInGameMenu);
   void renderOptionsScreen();
@@ -227,6 +231,8 @@ class GameEngine {
   ScreenState screen_ = ScreenState::MainMenu;
   ScreenState optionsReturnScreen_ = ScreenState::MainMenu;
   int previewLevelIdx_ = 0;  // selected level in EpisodeSelect
+  int loadingPhase_ = 0;     // 0=studio, 1=game, 2=level
+  int loadingTicks_ = 0;
   std::string currentMusicVpath_;
 
   // Confirmation modal state
