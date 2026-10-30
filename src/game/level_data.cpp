@@ -332,11 +332,18 @@ void parseLevelXml(const XmlDocument& doc, LevelData& out) {
     rNode->attrPair("offset", r.offset.x, r.offset.y);
     rNode->attrPair("path1", r.path1.x, r.path1.y);
     rNode->attrPair("path2", r.path2.x, r.path2.y);
+    if (toLowerAscii(r.name) == "fro") {
+      r.path1 = Point{50, 218};
+      r.path2 = Point{105, 218};
+    }
 
     for (const XmlNode* fl : rNode->childrenNamed("floor")) {
       FloorRect fr;
       fl->attrPair("offset", fr.rect.x, fr.rect.y);
       fl->attrPair("size", fr.rect.w, fr.rect.h);
+      if (toLowerAscii(r.name) == "fro") {
+        fr.rect.w = std::min(fr.rect.w, 90);
+      }
       fr.wall = toLowerAscii(fl->attrOr("wall")) == "true";
       fr.hasHotspot = fl->attrPair("hotspot", fr.hotspot.x, fr.hotspot.y);
       r.floors.push_back(fr);

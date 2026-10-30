@@ -508,10 +508,34 @@ bool GameEngine::selectLevel(int index) {
       woody_.pos = sp.position;
       woody_.layer = sp.layer;
       if (toLowerAscii(woody_.room) == "fro") {
-        woody_.pos.x = 320;
+        woody_.room = "anc";
+        int outIdx = findObjectIndex("anc/fro", "anc");
+        Point startPos{780, 420};
+        if (outIdx >= 0) {
+          const PlacedObject& po = level_.objects[outIdx];
+          const ObjectDef* od = level_.findObjectDef(po.name);
+          startPos = od ? od->hotspotOr("woody_out", Point{552, 420}) : Point{552, 420};
+          startPos.x += po.position.x;
+        }
+        if (const RoomDef* rAnc = level_.findRoom("anc")) {
+          int lo = std::min(rAnc->path1.x, rAnc->path2.x);
+          int hi = std::max(rAnc->path1.x, rAnc->path2.x);
+          if (hi > lo) startPos.x = std::clamp(startPos.x, lo, hi);
+        }
+        woody_.pos = startPos;
+        woody_.facing = 3;  // facing left into the hallway
+        woody_.currentAnim = "ms3";
+
+        // Play door opening / stepping into the room
+        if (outIdx >= 0) {
+          level_.objects[outIdx].currentAnim = "woody_leave";
+          level_.objects[outIdx].nextAnim = "ms";
+          level_.objects[outIdx].animFrame = 0;
+        }
+
         TaskStep introWalk{};
         introWalk.type = TaskStep::Type::WalkToX;
-        introWalk.targetX = 140;
+        introWalk.targetX = std::max(100, startPos.x - 70);
         introWalk.sneak = false;
         woodyQueue_.push_back(introWalk);
 
@@ -519,7 +543,7 @@ bool GameEngine::selectLevel(int index) {
         introAnim.type = TaskStep::Type::PlayAction;
         introAnim.actorAnim = "smile";
         introAnim.actorNextAnim = "ms2";
-        introAnim.durationTicks = 13;
+        introAnim.durationTicks = 16;
         introAnim.nonInterruptible = true;
         woodyQueue_.push_back(introAnim);
       }
@@ -798,6 +822,10 @@ Rect GameEngine::objectWorldHitbox(const PlacedObject& po) const {
       return Rect{base.x + fr.offset.x, base.y + fr.offset.y, w, h};
     }
   }
+  if (po.isDoor) {
+    Point hs = od ? od->hotspotOr("woody", od->hotspotOr("neighbor", Point{450, 390})) : Point{450, 390};
+    return Rect{base.x + hs.x - 45, base.y + hs.y - 170, 90, 180};
+  }
   if (od) {
     Point hs = od->hotspotOr("woody", od->hotspotOr("neighbor", Point{450, 390}));
     return Rect{base.x + hs.x - 35, base.y + hs.y - 90, 70, 90};
@@ -869,20 +897,6 @@ void GameEngine::updateHover(int worldX, int worldY, int screenX, int screenY) {
   hoveredInvSlot_ = -1;
   hoveredInvTicks_ = 0;
 
-  // Exit door in front hallway (fro)
-  if (const RoomDef* froRoom = level_.findRoom("fro")) {
-    int rx = worldX - froRoom->offset.x;
-    int ry = worldY - froRoom->offset.y;
-    if (rx >= 280 && rx <= 440 && ry >= 60 && ry <= 260) {
-      hoveredObject_ = -2;
-      hoveredRoom_ = "fro";
-      std::string endStr = level_.getString("end", "string");
-      hoverText_ = (endStr.empty() ? "Выйти через" : endStr) + " входную дверь";
-      cursorVpath_ = "gfx/cursor/use.tga";
-      return;
-    }
-  }
-
   const std::string heldItem = (selectedInv_ >= 0 && selectedInv_ < (int)inventory_.size()) ? inventory_[selectedInv_] : std::string();
 
   // Hit-test objects (prefer higher layers and doors/objects)
@@ -938,8 +952,15 @@ void GameEngine::updateHover(int worldX, int worldY, int screenX, int screenY) {
     const std::string sa = od ? toLowerAscii(od->stdAction) : "look";
     if (po.isDoor || sa == "goto" || sa == "end") {
       std::string verb = level_.getUIString(sa == "end" ? "end" : "goto");
-      if (verb.empty()) verb = "Идти в";
-      hoverText_ = verb + " " + objTitle;
+      if (verb.empty()) verb = (sa == "end" ? "Выйти через" : "Идти в");
+      if (toLowerAscii(po.name) == "anc/fro") {
+        std::string endStr = level_.getString("end", "string");
+        hoverText_ = (endStr.empty() ? "Выйти через" : endStr) + " входную дверь";
+      } else if (toLowerAscii(po.name) == "fro/anc") {
+        hoverText_ = "Войти в дом";
+      } else {
+        hoverText_ = verb + " " + objTitle;
+      }
       if (od && od->hasFlag("doorleft")) cursorVpath_ = "gfx/cursor/use_door_3.tga";
       else if (od && od->hasFlag("doorright")) cursorVpath_ = "gfx/cursor/use_door_1.tga";
       else if (od && od->hasFlag("doordown")) cursorVpath_ = "gfx/cursor/use_door_2.tga";
@@ -1196,39 +1217,15 @@ void GameEngine::onLeftClick(int worldX, int worldY, int screenX, int screenY, b
     return p;
   };
 
-  if (hoveredObject_ == -2) {
-    selectedInv_ = -1;
-    Point curPos = currentWoodyEndPos();
-    std::string curRoom = woody_.room;
-    for (const TaskStep& st : woodyQueue_) {
-      if (st.type == TaskStep::Type::TraverseDoor) curRoom = st.targetRoom;
-    }
-    enqueueRoomWalk(woodyQueue_, curRoom, curPos, Point{330, 218}, false);
-    TaskStep exitStep{};
-    exitStep.type = TaskStep::Type::PlayAction;
-    exitStep.actorAnim = "ms2";
-    exitStep.actorNextAnim = "ms2";
-    exitStep.durationTicks = 2;
-    exitStep.nonInterruptible = true;
-    exitStep.isExitLevel = true;
-    woodyQueue_.push_back(exitStep);
-    return;
-  }
-
   if (hoveredObject_ >= 0) {
     const PlacedObject& po = level_.objects[hoveredObject_];
     const ObjectDef* od = level_.findObjectDef(po.name);
 
-    // Exit door: walk up and open exit confirmation dialog
-    if (od && toLowerAscii(od->stdAction) == "end") {
+    // Exit door: walk up, step through the door and open exit confirmation dialog
+    if (toLowerAscii(po.name) == "anc/fro" || (od && toLowerAscii(od->stdAction) == "end" && toLowerAscii(po.roomName) == "anc")) {
       selectedInv_ = -1;
-      Point curPos = currentWoodyEndPos();
-      std::string curRoom = woody_.room;
-      for (const TaskStep& st : woodyQueue_) {
-        if (st.type == TaskStep::Type::TraverseDoor) curRoom = st.targetRoom;
-      }
-      Point hs = od->hotspotOr("woody", Point{po.position.x, 218});
-      enqueueRoomWalk(woodyQueue_, curRoom, curPos, hs, false);
+      queuePathToRoom("anc", doubleClick);
+      queuePathToRoom("fro", doubleClick);
       TaskStep exitStep{};
       exitStep.type = TaskStep::Type::PlayAction;
       exitStep.actorAnim = "ms2";
@@ -1237,6 +1234,13 @@ void GameEngine::onLeftClick(int worldX, int worldY, int screenX, int screenY, b
       exitStep.nonInterruptible = true;
       exitStep.isExitLevel = true;
       woodyQueue_.push_back(exitStep);
+      return;
+    }
+
+    // Porch door leading back inside the house: fro/anc
+    if (toLowerAscii(po.name) == "fro/anc") {
+      selectedInv_ = -1;
+      queuePathToRoom("anc", doubleClick);
       return;
     }
 
@@ -1471,6 +1475,10 @@ void GameEngine::updateWoody() {
             woody_.pos.y += (dy > 0 ? speed : -speed);
           }
         }
+        if (toLowerAscii(woody_.room) == "fro") {
+          woody_.pos.x = std::clamp(woody_.pos.x, 50, 105);
+          woody_.pos.y = 218;
+        }
         return;
       }
 
@@ -1490,6 +1498,10 @@ void GameEngine::updateWoody() {
           }
           woody_.room = step.targetRoom;
           woody_.pos = step.outPos;
+          if (toLowerAscii(woody_.room) == "fro") {
+            woody_.pos.x = std::clamp(woody_.pos.x, 50, 105);
+            woody_.pos.y = 218;
+          }
           woody_.hidden = false;
           woody_.currentAnim = step.outAnim;
           woody_.nextAnim = step.outAnim;
