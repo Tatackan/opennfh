@@ -238,7 +238,7 @@ class GameEngine {
   ScreenState screen_ = ScreenState::MainMenu;
   ScreenState optionsReturnScreen_ = ScreenState::MainMenu;
   int previewLevelIdx_ = 0;  // selected level in EpisodeSelect
-  int levelIntroPhase_ = 0;  // 0=none, 1=JoWooD TV dog logo, 2=Game logo & episode title
+  int levelIntroPhase_ = 0;  // 0=none, 1=authentic loading screen
   int levelIntroTicks_ = 0;
   std::string currentMusicVpath_;
 

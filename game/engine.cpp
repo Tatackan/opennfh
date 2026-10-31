@@ -34,42 +34,6 @@ std::vector<fs::path> systemFonts() {
 #endif
 }
 
-std::string toUpperUtf8(const std::string& str) {
-  std::string res;
-  res.reserve(str.size());
-  for (size_t i = 0; i < str.size(); ++i) {
-    unsigned char c = (unsigned char)str[i];
-    if (c >= 'a' && c <= 'z') {
-      res += (char)(c - 'a' + 'A');
-    } else if (c == 0xD0 && i + 1 < str.size()) {
-      unsigned char c2 = (unsigned char)str[i + 1];
-      if (c2 >= 0xB0 && c2 <= 0xBF) {
-        res += (char)0xD0;
-        res += (char)(c2 - 0x20);
-        i++;
-      } else {
-        res += str[i];
-      }
-    } else if (c == 0xD1 && i + 1 < str.size()) {
-      unsigned char c2 = (unsigned char)str[i + 1];
-      if (c2 >= 0x80 && c2 <= 0x8F) {
-        res += (char)0xD0;
-        res += (char)(c2 + 0x20);
-        i++;
-      } else if (c2 == 0x91) {
-        res += (char)0xD0;
-        res += (char)0x81;
-        i++;
-      } else {
-        res += str[i];
-      }
-    } else {
-      res += str[i];
-    }
-  }
-  return res;
-}
-
 }  // namespace
 
 GameEngine::GameEngine() = default;
@@ -223,16 +187,10 @@ bool GameEngine::init(const GameOptions& opts) {
     completedSeason_ = 1;
     seasonTrophyTier_ = 3;
     enterScreen(ScreenState::SeasonVictory);
-  } else if (scr == "intro1" || scr == "splash" || scr == "splash0" || scr == "loading0") {
+  } else if (scr == "loading" || scr == "loading0" || scr == "loading1" || scr == "splash" || scr == "splash0" || scr == "splash1" || scr == "intro" || scr == "intro1" || scr == "intro2") {
     enterScreen(ScreenState::InGame);
     levelIntroPhase_ = 1;
-    levelIntroTicks_ = 0;
-    statusBanner_.clear();
-    bannerTicks_ = 0;
-  } else if (scr == "intro2" || scr == "splash1" || scr == "loading1" || scr == "loading2" || scr == "loading") {
-    enterScreen(ScreenState::InGame);
-    levelIntroPhase_ = 2;
-    levelIntroTicks_ = 0;
+    levelIntroTicks_ = 18;  // partial progress for test screenshots
     statusBanner_.clear();
     bannerTicks_ = 0;
   } else if (scr == "confirm") {
@@ -353,7 +311,7 @@ bool GameEngine::init(const GameOptions& opts) {
     }
   } else if (!opts.screenshot.empty() || !opts.recordDir.empty()) {
     enterScreen(ScreenState::InGame);
-    if (scr != "intro1" && scr != "intro2" && scr != "splash" && scr != "splash0" && scr != "splash1") {
+    if (scr != "loading" && scr != "loading0" && scr != "splash" && scr != "splash0" && scr != "intro" && scr != "intro1" && scr != "intro2") {
       levelIntroPhase_ = 0;
     }
   } else if (opts.startInLevel) {
@@ -649,8 +607,7 @@ void GameEngine::startLevelWithSplash(int levelIdx) {
   levelIntroTicks_ = 0;
   enterScreen(ScreenState::InGame);
   if (levelIntroPhase_ > 0) {
-    playSfx("sfx/dog_bark1.wav");
-    startMusic("sfx/music/jingle_levelstart.mp3");
+    stopMusic();
   }
 }
 
@@ -822,6 +779,19 @@ bool GameEngine::selectLevel(int index) {
     tb.layer = 1;
     tb.visible = true;
     level_.objects.push_back(std::move(tb));
+  }
+
+  // In level_piano, the kids kick the football into the kitchen through the window
+  if (level_.findObjectDef("kit/football") && findObjectIndex("kit/football", "kit") < 0) {
+    PlacedObject fb;
+    fb.name = "kit/football";
+    fb.roomName = "kit";
+    fb.layer = 1;
+    fb.position = Point{630, 400};
+    fb.currentAnim = "ms";
+    fb.nextAnim = "ms";
+    fb.visible = true;
+    level_.objects.push_back(std::move(fb));
   }
 
   buildNeighborRoutine();
@@ -2609,21 +2579,44 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
     auto bTrick = level_.tricks.find("kit/bowlingball");
     pushStep(objIdx, "kickbowling", "shout0", "ms", "ms", kickFrames, "", bTrick != level_.tricks.end(), bTrick != level_.tricks.end() ? &bTrick->second : nullptr);
     pushStep(objIdx, "shout0", "take_short", "ms", "ms", 26);
+    pushStep(objIdx, "take_short", "ms1", "ms", "ms", 12, "kit/football", false, nullptr, -1, true);
     if (winIdx >= 0) {
+      const PlacedObject& winPo = level_.objects[winIdx];
+      const ObjectDef* winOd = level_.findObjectDef(winPo.name);
+      Point winHs = winOd ? winOd->hotspotOr("neighbor", Point{690, 420}) : Point{690, 420};
+      winHs.x += winPo.position.x;
+      winHs.y += winPo.position.y;
+      Point curPos{po.position.x + 595, 420};
+      enqueueRoomWalk(neighborQueue_, po.roomName, curPos, winHs, false);
       int throwFrames = animFrameCount("kit/window", "throw_bowling", 24);
       pushStep(winIdx, "inv", "ms2", "throw_bowling", "ms", throwFrames);
     }
-    pushStep(objIdx, "take_short", "ms1", "ms", "ms", 12, "kit/football", false, nullptr, -1, true);
     return;
   }
   if (lowerName == "kit/football") {
     int kickFrames = animFrameCount("neighbor", "kick", 16);
     int winIdx = findObjectIndex("kit/window", po.roomName);
-    pushStep(objIdx, "kick", "ms1", "flyout", "inv", kickFrames);
+    pushStep(objIdx, "kick", "ms1", "flyout", "inv", kickFrames, "", false, nullptr, -1, true);
     if (winIdx >= 0) {
+      const PlacedObject& winPo = level_.objects[winIdx];
+      const ObjectDef* winOd = level_.findObjectDef(winPo.name);
+      Point winHs = winOd ? winOd->hotspotOr("neighbor", Point{690, 420}) : Point{690, 420};
+      winHs.x += winPo.position.x;
+      winHs.y += winPo.position.y;
+      Point curPos{po.position.x + 595, 420};
+      enqueueRoomWalk(neighborQueue_, po.roomName, curPos, winHs, false);
       int shoutFrames = animFrameCount("kit/window", "shout", 37);
       pushStep(winIdx, "inv", "ms2", "shout", "ms", shoutFrames);
     }
+    return;
+  }
+  if (lowerName == "kit/microwavedirty") {
+    int discFrames = animFrameCount("neighbor", "discover1", 20);
+    int cleanFrames = animFrameCount("neighbor", "use_mid", 23);
+    auto mwTrick = level_.tricks.find("kit/microwavedirty");
+    pushStep(objIdx, "discover1", "shout0", "ms", "ms", discFrames);
+    pushStep(objIdx, "shout0", "use_mid", "ms", "ms", 26, "", mwTrick != level_.tricks.end(), mwTrick != level_.tricks.end() ? &mwTrick->second : nullptr);
+    pushStep(objIdx, "use_mid", "ms0", "ms", "ms", cleanFrames, "kit/microwave");
     return;
   }
   if (lowerName == "kit/window") {
@@ -2646,6 +2639,11 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
     pushStep(objIdx, "puke", "shout0", "ms", "ms", pukeFrames);
     pushStep(objIdx, "shout0", "clean", "ms", "ms", 26, "", stTrick != level_.tricks.end(), stTrick != level_.tricks.end() ? &stTrick->second : nullptr);
     pushStep(objIdx, "clean", "ms2", "ms", "ms", 24, "anc/flower");
+    return;
+  }
+  if (lowerName == "anc/flower") {
+    int smellFrames = animFrameCount("neighbor", "smell", 46);
+    pushStep(objIdx, "smell", "ms3", "ms", "ms", smellFrames);
     return;
   }
   if (lowerName == "anc/mum_smeared") {
@@ -2713,7 +2711,8 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
     return;
   }
   if (lowerName == "lir/score") {
-    pushStep(objIdx, "inv", "ms3", "play", "ms", 45);
+    pushStep(objIdx, "inv", "ms3", "play", "playslow_angry", 71);
+    pushStep(objIdx, "inv", "ms2", "playslow_angry", "ms", 28);
     return;
   }
   if (lowerName == "lir/scoresmeared" || lowerName == "lir/manipulatedscore") {
@@ -3598,27 +3597,15 @@ void GameEngine::tickSimulation() {
 
   if (screen_ == ScreenState::InGame && levelIntroPhase_ > 0) {
     const std::string iscr = toLowerAscii(opts_.initialScreen);
-    if (iscr == "intro1") {
-      levelIntroPhase_ = 1;
-      return;
-    }
-    if (iscr == "intro2") {
-      levelIntroPhase_ = 2;
+    if (iscr == "loading" || iscr == "splash" || iscr == "loading0" || iscr == "intro" || iscr == "intro1") {
       return;
     }
     levelIntroTicks_++;
-    if (levelIntroPhase_ == 1) {
-      if (levelIntroTicks_ >= 50) {
-        levelIntroPhase_ = 2;
-        levelIntroTicks_ = 0;
-      }
-    } else if (levelIntroPhase_ == 2) {
-      if (levelIntroTicks_ >= 60) {
-        levelIntroPhase_ = 0;
-        levelIntroTicks_ = 0;
-        std::string setLow = toLowerAscii(level_.info.setName);
-        startMusic((setLow == "set02" || setLow == "set03") ? "sfx/music/ingame2_normal.mp3" : "sfx/music/ingame1_slow.mp3");
-      }
+    if (levelIntroTicks_ >= 32) {
+      levelIntroPhase_ = 0;
+      levelIntroTicks_ = 0;
+      std::string setLow = toLowerAscii(level_.info.setName);
+      startMusic((setLow == "set02" || setLow == "set03") ? "sfx/music/ingame2_normal.mp3" : "sfx/music/ingame1_slow.mp3");
     }
     return;
   }
@@ -4338,71 +4325,21 @@ void GameEngine::renderEpisodeSelect() {
 void GameEngine::renderLevelIntroOverlay() {
   if (levelIntroPhase_ <= 0) return;
 
-  auto drawTextWithOutline = [&](TextRenderer& font, const std::string& str, const SDL_Rect& rect,
-                                 SDL_Color fg, SDL_Color bg, int outline, float scale = 1.0f) {
-    int outPx = std::max(1, int(std::round(outline * menuScale())));
-    for (int dx = -outPx; dx <= outPx; dx += outPx) {
-      for (int dy = -outPx; dy <= outPx; dy += outPx) {
-        if (dx == 0 && dy == 0) continue;
-        SDL_Rect r = rect;
-        r.x += dx;
-        r.y += dy;
-        font.drawAligned(str, r, bg, 0, 0, scale);
-      }
-    }
-    font.drawAligned(str, rect, fg, 0, 0, scale);
-  };
+  // Authentic loading screen background: gfx/loading.tga (800x600 sepia photo of neighbor in armchair)
+  drawMenuImage("gfx/loading.tga", 0, 0);
 
-  if (levelIntroPhase_ == 1) {
-    // Phase 1: JoWooD Vienna TV (Dog logo) + "ПРЕДСТАВЛЯЕТ"
-    const TexEntry* logo = getTexture("gfx/gui/logo/JWD_vienna.tga");
-    if (logo) {
-      int lw = logo->w;
-      int lh = logo->h;
-      int lx = (800 - lw) / 2;
-      int ly = 95;
-      SDL_Rect dst = menuRect(lx, ly, lw, lh);
-      SDL_RenderCopy(ren_, logo->tex, nullptr, &dst);
-    }
-    std::string presentsText = level_.getString("presents", "levelstart");
-    if (presentsText.empty()) presentsText = "представляет";
-    presentsText = toUpperUtf8(presentsText);
+  // Authentic progress bar:
+  // Background: gfx/gui/progress_back.tga (372x51), centered horizontally at x=214, y=539
+  drawMenuImage("gfx/gui/progress_back.tga", 214, 539);
 
-    SDL_Rect textRect = menuRect(0, 395, 800, 38);
-    drawTextWithOutline(fontComicBig_, presentsText, textRect,
-                        SDL_Color{255, 255, 255, 255}, SDL_Color{0, 0, 0, 255}, 2, 1.05f * menuScale());
-  } else if (levelIntroPhase_ == 2) {
-    // Phase 2: Game title logo + "В СЕРИИ" + Episode Title
-    const TexEntry* logo = getTexture("gfx/gui/logo/logo_main.tga");
-    if (logo) {
-      int lw = logo->w;
-      int lh = logo->h;
-      int lx = (800 - lw) / 2;
-      int ly = 135;
-      SDL_Rect dst = menuRect(lx, ly, lw, lh);
-      SDL_RenderCopy(ren_, logo->tex, nullptr, &dst);
-    }
-
-    std::string inText = level_.getString("in", "levelstart");
-    if (inText.empty()) inText = "в серии";
-    inText = toUpperUtf8(inText);
-
-    SDL_Rect inRect = menuRect(0, 340, 800, 32);
-    drawTextWithOutline(fontComic_, inText, inRect,
-                        SDL_Color{255, 255, 255, 255}, SDL_Color{0, 0, 0, 255}, 2, 1.0f * menuScale());
-
-    int lIdx = std::clamp(currentLevelIdx_, 0, (int)levels_.size() - 1);
-    std::string epTitle;
-    if (lIdx < (int)briefings_.size() && !briefings_[lIdx].title.empty()) {
-      epTitle = briefings_[lIdx].title;
-    } else {
-      epTitle = levels_[lIdx].name;
-    }
-    epTitle = toUpperUtf8(epTitle);
-
-    SDL_Rect epRect = menuRect(10, 385, 780, 48);
-    drawTextWithOutline(fontComicBig_, epTitle, epRect,
-                        SDL_Color{255, 255, 255, 255}, SDL_Color{0, 0, 0, 255}, 2, 1.15f * menuScale());
+  // Fill: gfx/gui/progress_front.tga (372x51)
+  const TexEntry* front = getTexture("gfx/gui/progress_front.tga");
+  if (front && front->tex) {
+    float p = std::clamp(float(levelIntroTicks_) / 30.0f, 0.05f, 1.0f);
+    int fillW = std::clamp((int)std::round(front->w * p), 1, front->w);
+    SDL_Rect srcRect{0, 0, fillW, front->h};
+    SDL_Rect dstRect = menuRect(214, 539, fillW, front->h);
+    SDL_RenderCopy(ren_, front->tex, &srcRect, &dstRect);
   }
 }
 
@@ -4921,10 +4858,11 @@ void GameEngine::render() {
       renderSeasonVictoryScreen();
       break;
     case ScreenState::InGame:
-      renderWorld();
-      renderHud();
       if (levelIntroPhase_ > 0) {
         renderLevelIntroOverlay();
+      } else {
+        renderWorld();
+        renderHud();
       }
       break;
     case ScreenState::LevelSummary:
@@ -4994,15 +4932,10 @@ int GameEngine::run() {
             }
           } else if (levelIntroPhase_ > 0) {
             if (e.button.button == SDL_BUTTON_LEFT) {
-              if (levelIntroPhase_ == 1) {
-                levelIntroPhase_ = 2;
-                levelIntroTicks_ = 0;
-              } else {
-                levelIntroPhase_ = 0;
-                levelIntroTicks_ = 0;
-                std::string setLow = toLowerAscii(level_.info.setName);
-                startMusic((setLow == "set02" || setLow == "set03") ? "sfx/music/ingame2_normal.mp3" : "sfx/music/ingame1_slow.mp3");
-              }
+              levelIntroPhase_ = 0;
+              levelIntroTicks_ = 0;
+              std::string setLow = toLowerAscii(level_.info.setName);
+              startMusic((setLow == "set02" || setLow == "set03") ? "sfx/music/ingame2_normal.mp3" : "sfx/music/ingame1_slow.mp3");
             }
           } else {
             Point wp = screenToWorld(mouseX_, mouseY_);
@@ -5028,15 +4961,10 @@ int GameEngine::run() {
               if (confirmAction_ != ConfirmAction::None) {
                 confirmAction_ = ConfirmAction::None;
               } else if (screen_ == ScreenState::InGame && levelIntroPhase_ > 0) {
-                if (levelIntroPhase_ == 1) {
-                  levelIntroPhase_ = 2;
-                  levelIntroTicks_ = 0;
-                } else {
-                  levelIntroPhase_ = 0;
-                  levelIntroTicks_ = 0;
-                  std::string setLow = toLowerAscii(level_.info.setName);
-                  startMusic((setLow == "set02" || setLow == "set03") ? "sfx/music/ingame2_normal.mp3" : "sfx/music/ingame1_slow.mp3");
-                }
+                levelIntroPhase_ = 0;
+                levelIntroTicks_ = 0;
+                std::string setLow = toLowerAscii(level_.info.setName);
+                startMusic((setLow == "set02" || setLow == "set03") ? "sfx/music/ingame2_normal.mp3" : "sfx/music/ingame1_slow.mp3");
               } else if (screen_ == ScreenState::InGame) {
                 if (selectedInv_ >= 0) selectedInv_ = -1;
                 else {
@@ -5064,15 +4992,10 @@ int GameEngine::run() {
             case SDLK_RETURN:
             case SDLK_SPACE:
               if (screen_ == ScreenState::InGame && levelIntroPhase_ > 0) {
-                if (levelIntroPhase_ == 1) {
-                  levelIntroPhase_ = 2;
-                  levelIntroTicks_ = 0;
-                } else {
-                  levelIntroPhase_ = 0;
-                  levelIntroTicks_ = 0;
-                  std::string setLow = toLowerAscii(level_.info.setName);
-                  startMusic((setLow == "set02" || setLow == "set03") ? "sfx/music/ingame2_normal.mp3" : "sfx/music/ingame1_slow.mp3");
-                }
+                levelIntroPhase_ = 0;
+                levelIntroTicks_ = 0;
+                std::string setLow = toLowerAscii(level_.info.setName);
+                startMusic((setLow == "set02" || setLow == "set03") ? "sfx/music/ingame2_normal.mp3" : "sfx/music/ingame1_slow.mp3");
               } else if (screen_ == ScreenState::InGame) {
                 paused_ = !paused_;
                 statusBanner_ = paused_ ? "ПАУЗА" : "Игра продолжается";
