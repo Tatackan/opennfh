@@ -239,23 +239,31 @@ bool GameEngine::init(const GameOptions& opts) {
     woody_.pos = Point{425, 415};
     neighbor_.room = "kit";
     neighbor_.pos = Point{350, 410};
+    neighborQueue_.clear();
+    woodyQueue_.clear();
     int sofaIdx = findObjectIndex("lir/sofa", "lir");
     if (sofaIdx >= 0) {
       PlacedObject& so = level_.objects[sofaIdx];
       so.currentAnim = "woody_saw";
-      so.animFrame = 20;
+      so.nextAnim = "ms";
+      so.animFrame = 18;
       woody_.hidden = true;
       woody_.currentAnim = "inv";
-      woodyActionTotalTicks_ = 180;
-      woodyActionTicks_ = 108;
+      woodyActionTotalTicks_ = 62;
+      woodyActionTicks_ = 44;
       TaskStep st{};
       st.type = TaskStep::Type::PlayAction;
       st.objectIndex = sofaIdx;
       st.actorAnim = "inv";
+      st.actorNextAnim = "smile";
       st.objAnim = "woody_saw";
-      st.durationTicks = 180;
-      st.elapsedTicks = 72;
+      st.objNextAnim = "ms";
+      st.durationTicks = 62;
+      st.elapsedTicks = 18;
       st.showProgressBar = true;
+      st.applyComboOnFinish = true;
+      st.combo.resultObject = "lir/sofa_broken";
+      st.combo.removeTarget = true;
       woodyQueue_.push_back(st);
     }
   } else if (scr == "test_woody_fear") {
@@ -1649,6 +1657,10 @@ void GameEngine::advanceObjectAnims() {
           po.currentAnim = "ms";
           po.nextAnim = "ms";
           po.animFrame = 0;
+        } else if (!po.nextAnim.empty() && po.nextAnim != po.currentAnim) {
+          po.currentAnim = po.nextAnim;
+          po.nextAnim = "ms";
+          po.animFrame = 0;
         } else {
           po.animFrame = (int)anim.frames.size() - 1;
         }
@@ -1956,16 +1968,16 @@ void GameEngine::updateWoody() {
           continue;
         }
 
+        if (step.actorAnim == "inv") {
+          woody_.hidden = true;
+          woody_.currentAnim = "inv";
+        } else if (step.elapsedTicks == 0 && !step.actorAnim.empty()) {
+          woody_.hidden = false;
+          woody_.currentAnim = step.actorAnim;
+          woody_.nextAnim = step.actorNextAnim;
+          woody_.animFrame = 0;
+        }
         if (step.elapsedTicks == 0) {
-          if (step.actorAnim == "inv") {
-            woody_.hidden = true;
-            woody_.currentAnim = "inv";
-          } else if (!step.actorAnim.empty()) {
-            woody_.hidden = false;
-            woody_.currentAnim = step.actorAnim;
-            woody_.nextAnim = step.actorNextAnim;
-            woody_.animFrame = 0;
-          }
           if (step.objectIndex >= 0 && step.objectIndex < (int)level_.objects.size() && !step.objAnim.empty()) {
             PlacedObject& po = level_.objects[step.objectIndex];
             po.currentAnim = step.objAnim;
@@ -2117,7 +2129,9 @@ void GameEngine::updateWoody() {
               if (!a->actorAnim.empty()) actActorAnim = a->actorAnim;
               if (!a->actorNextAnim.empty()) actNextAnim = a->actorNextAnim;
               if (!a->objAnim.empty()) actObjAnim = a->objAnim;
-              if (a->timeTicks > 0) {
+              if (actObjAnim == "woody_saw") {
+                actTicks = animFrameCount(od->gfx, actObjAnim, 62);
+              } else if (a->timeTicks > 0) {
                 actTicks = a->timeTicks;
               } else if (!actObjAnim.empty() && actObjAnim != "ms") {
                 actTicks = animFrameCount(od->gfx, actObjAnim, 16);
@@ -2260,8 +2274,32 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
       surpSt.durationTicks = animFrameCount(od->gfx, surpAnim, 36);
       surpSt.triggerPrankScore = true;
       surpSt.trick = trickIt->second;
-      surpSt.transformObjectTo = origName.empty() ? "lir/sofa" : origName;
       neighborQueue_.push_back(surpSt);
+
+      if (lowerName == "lir/sofa_broken") {
+        // Neighbor shouts in rage after falling through the broken chair
+        TaskStep shoutSt{};
+        shoutSt.type = TaskStep::Type::PlayAction;
+        shoutSt.objectIndex = objIdx;
+        shoutSt.actorAnim = "shout0";
+        shoutSt.actorNextAnim = "ms0";
+        shoutSt.durationTicks = animFrameCount("neighbor", "shout0", 26);
+        neighborQueue_.push_back(shoutSt);
+
+        // Neighbor repairs the broken chair (original action: use_low, 47 ticks)
+        TaskStep repSt{};
+        repSt.type = TaskStep::Type::PlayAction;
+        repSt.objectIndex = objIdx;
+        repSt.actorAnim = "use_low";
+        repSt.actorNextAnim = "ms0";
+        repSt.objAnim = "ms";
+        repSt.objNextAnim = "ms";
+        repSt.durationTicks = 47;
+        repSt.transformObjectTo = origName.empty() ? "lir/sofa" : origName;
+        neighborQueue_.push_back(repSt);
+      } else {
+        surpSt.transformObjectTo = origName.empty() ? "lir/sofa" : origName;
+      }
     } else {
       if (isSofaLevel) {
         TaskStep beerSt{};
