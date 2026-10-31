@@ -238,8 +238,9 @@ class GameEngine {
   ScreenState screen_ = ScreenState::MainMenu;
   ScreenState optionsReturnScreen_ = ScreenState::MainMenu;
   int previewLevelIdx_ = 0;  // selected level in EpisodeSelect
-  int levelIntroPhase_ = 0;  // 0=none, 1=authentic loading screen
+  int levelIntroPhase_ = 0;  // 0=none, 1=authentic loading screen, 2=fade out to game
   int levelIntroTicks_ = 0;
+  float fadeAlpha_ = 0.0f;  // screen transition fade overlay (0=transparent, 255=black)
   std::string currentMusicVpath_;
 
   // Confirmation modal state

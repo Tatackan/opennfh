@@ -191,6 +191,7 @@ bool GameEngine::init(const GameOptions& opts) {
     enterScreen(ScreenState::InGame);
     levelIntroPhase_ = 1;
     levelIntroTicks_ = 18;  // partial progress for test screenshots
+    fadeAlpha_ = 0.0f;
     statusBanner_.clear();
     bannerTicks_ = 0;
   } else if (scr == "confirm") {
@@ -605,6 +606,7 @@ void GameEngine::startLevelWithSplash(int levelIdx) {
   bannerTicks_ = 0;
   levelIntroPhase_ = opts_.screenshot.empty() ? 1 : 0;
   levelIntroTicks_ = 0;
+  fadeAlpha_ = (levelIntroPhase_ > 0) ? 255.0f : 0.0f;
   enterScreen(ScreenState::InGame);
   if (levelIntroPhase_ > 0) {
     stopMusic();
@@ -617,6 +619,10 @@ void GameEngine::enterScreen(ScreenState st) {
   selectedInv_ = -1;
   hoverText_.clear();
   cursorVpath_ = "gfx/cursor/normal.tga";
+
+  if (opts_.screenshot.empty() && st != ScreenState::PauseMenu && st != ScreenState::InGame) {
+    fadeAlpha_ = std::max(fadeAlpha_, 180.0f);
+  }
 
   if (st == ScreenState::MainMenu || st == ScreenState::EpisodeSelect || st == ScreenState::Options ||
       st == ScreenState::Credits) {
@@ -728,13 +734,30 @@ bool GameEngine::selectLevel(int index) {
         }
         woody_.pos = startPos;
         woody_.facing = 3;  // facing left into the hallway
-        woody_.currentAnim = "ms3";
+        woody_.currentAnim = "inv";
+        woody_.nextAnim = "inv";
+        woody_.hidden = true;
 
-        // Play door opening / stepping into the room
         if (outIdx >= 0) {
-          level_.objects[outIdx].currentAnim = "woody_leave";
-          level_.objects[outIdx].nextAnim = "ms";
-          level_.objects[outIdx].animFrame = 0;
+          int doorDuration = 23;
+          if (const PlacedObject* po = &level_.objects[outIdx]) {
+            const ObjectDef* od = level_.findObjectDef(po->name);
+            doorDuration = animFrameCount(od ? od->gfx : po->name, "woody_leave", 23);
+          }
+          TaskStep introDoor{};
+          introDoor.type = TaskStep::Type::PlayAction;
+          introDoor.objectIndex = outIdx;
+          introDoor.actorAnim = "inv";
+          introDoor.actorNextAnim = "ms3";
+          introDoor.objAnim = "woody_leave";
+          introDoor.objNextAnim = "ms";
+          introDoor.durationTicks = doorDuration;
+          introDoor.nonInterruptible = true;
+          woodyQueue_.push_back(introDoor);
+        } else {
+          woody_.hidden = false;
+          woody_.currentAnim = "ms3";
+          woody_.nextAnim = "ms3";
         }
 
         TaskStep introWalk{};
@@ -3598,16 +3621,35 @@ void GameEngine::tickSimulation() {
   if (screen_ == ScreenState::InGame && levelIntroPhase_ > 0) {
     const std::string iscr = toLowerAscii(opts_.initialScreen);
     if (iscr == "loading" || iscr == "splash" || iscr == "loading0" || iscr == "intro" || iscr == "intro1") {
+      fadeAlpha_ = 0.0f;
       return;
     }
     levelIntroTicks_++;
-    if (levelIntroTicks_ >= 32) {
-      levelIntroPhase_ = 0;
-      levelIntroTicks_ = 0;
-      std::string setLow = toLowerAscii(level_.info.setName);
-      startMusic((setLow == "set02" || setLow == "set03") ? "sfx/music/ingame2_normal.mp3" : "sfx/music/ingame1_slow.mp3");
+    if (levelIntroPhase_ == 1) {
+      if (levelIntroTicks_ <= 8) {
+        fadeAlpha_ = std::max(0.0f, 255.0f - float(levelIntroTicks_) * (255.0f / 8.0f));
+      } else {
+        fadeAlpha_ = 0.0f;
+      }
+      if (levelIntroTicks_ >= 38) {
+        levelIntroPhase_ = 2;
+        levelIntroTicks_ = 0;
+      }
+    } else if (levelIntroPhase_ == 2) {
+      fadeAlpha_ = std::min(255.0f, float(levelIntroTicks_) * (255.0f / 8.0f));
+      if (levelIntroTicks_ >= 8) {
+        levelIntroPhase_ = 0;
+        levelIntroTicks_ = 0;
+        fadeAlpha_ = 255.0f;
+        std::string setLow = toLowerAscii(level_.info.setName);
+        startMusic((setLow == "set02" || setLow == "set03") ? "sfx/music/ingame2_normal.mp3" : "sfx/music/ingame1_slow.mp3");
+      }
     }
     return;
+  }
+
+  if (fadeAlpha_ > 0.0f) {
+    fadeAlpha_ = std::max(0.0f, fadeAlpha_ - (255.0f / 8.0f));
   }
 
   if (screen_ != ScreenState::InGame || paused_ || confirmAction_ != ConfirmAction::None) return;
@@ -4335,7 +4377,10 @@ void GameEngine::renderLevelIntroOverlay() {
   // Fill: gfx/gui/progress_front.tga (372x51)
   const TexEntry* front = getTexture("gfx/gui/progress_front.tga");
   if (front && front->tex) {
-    float p = std::clamp(float(levelIntroTicks_) / 30.0f, 0.05f, 1.0f);
+    float p = 1.0f;
+    if (levelIntroPhase_ == 1) {
+      p = std::clamp((float(levelIntroTicks_) - 4.0f) / 28.0f, 0.05f, 1.0f);
+    }
     int fillW = std::clamp((int)std::round(front->w * p), 1, front->w);
     SDL_Rect srcRect{0, 0, fillW, front->h};
     SDL_Rect dstRect = menuRect(214, 539, fillW, front->h);
@@ -4872,6 +4917,13 @@ void GameEngine::render() {
       break;
   }
 
+  if (fadeAlpha_ > 0.5f && opts_.screenshot.empty()) {
+    SDL_SetRenderDrawBlendMode(ren_, SDL_BLENDMODE_BLEND);
+    SDL_SetRenderDrawColor(ren_, 0, 0, 0, (Uint8)std::clamp(fadeAlpha_, 0.0f, 255.0f));
+    SDL_Rect fullScreen{0, 0, winW_, winH_};
+    SDL_RenderFillRect(ren_, &fullScreen);
+  }
+
   renderConfirmModal();
   renderCursor();
   if (!pendingScreenshotFile_.empty()) {
@@ -4932,10 +4984,16 @@ int GameEngine::run() {
             }
           } else if (levelIntroPhase_ > 0) {
             if (e.button.button == SDL_BUTTON_LEFT) {
-              levelIntroPhase_ = 0;
-              levelIntroTicks_ = 0;
-              std::string setLow = toLowerAscii(level_.info.setName);
-              startMusic((setLow == "set02" || setLow == "set03") ? "sfx/music/ingame2_normal.mp3" : "sfx/music/ingame1_slow.mp3");
+              if (levelIntroPhase_ == 1) {
+                levelIntroPhase_ = 2;
+                levelIntroTicks_ = 0;
+              } else {
+                levelIntroPhase_ = 0;
+                levelIntroTicks_ = 0;
+                fadeAlpha_ = 0.0f;
+                std::string setLow = toLowerAscii(level_.info.setName);
+                startMusic((setLow == "set02" || setLow == "set03") ? "sfx/music/ingame2_normal.mp3" : "sfx/music/ingame1_slow.mp3");
+              }
             }
           } else {
             Point wp = screenToWorld(mouseX_, mouseY_);
@@ -4961,10 +5019,16 @@ int GameEngine::run() {
               if (confirmAction_ != ConfirmAction::None) {
                 confirmAction_ = ConfirmAction::None;
               } else if (screen_ == ScreenState::InGame && levelIntroPhase_ > 0) {
-                levelIntroPhase_ = 0;
-                levelIntroTicks_ = 0;
-                std::string setLow = toLowerAscii(level_.info.setName);
-                startMusic((setLow == "set02" || setLow == "set03") ? "sfx/music/ingame2_normal.mp3" : "sfx/music/ingame1_slow.mp3");
+                if (levelIntroPhase_ == 1) {
+                  levelIntroPhase_ = 2;
+                  levelIntroTicks_ = 0;
+                } else {
+                  levelIntroPhase_ = 0;
+                  levelIntroTicks_ = 0;
+                  fadeAlpha_ = 0.0f;
+                  std::string setLow = toLowerAscii(level_.info.setName);
+                  startMusic((setLow == "set02" || setLow == "set03") ? "sfx/music/ingame2_normal.mp3" : "sfx/music/ingame1_slow.mp3");
+                }
               } else if (screen_ == ScreenState::InGame) {
                 if (selectedInv_ >= 0) selectedInv_ = -1;
                 else {
@@ -4992,10 +5056,16 @@ int GameEngine::run() {
             case SDLK_RETURN:
             case SDLK_SPACE:
               if (screen_ == ScreenState::InGame && levelIntroPhase_ > 0) {
-                levelIntroPhase_ = 0;
-                levelIntroTicks_ = 0;
-                std::string setLow = toLowerAscii(level_.info.setName);
-                startMusic((setLow == "set02" || setLow == "set03") ? "sfx/music/ingame2_normal.mp3" : "sfx/music/ingame1_slow.mp3");
+                if (levelIntroPhase_ == 1) {
+                  levelIntroPhase_ = 2;
+                  levelIntroTicks_ = 0;
+                } else {
+                  levelIntroPhase_ = 0;
+                  levelIntroTicks_ = 0;
+                  fadeAlpha_ = 0.0f;
+                  std::string setLow = toLowerAscii(level_.info.setName);
+                  startMusic((setLow == "set02" || setLow == "set03") ? "sfx/music/ingame2_normal.mp3" : "sfx/music/ingame1_slow.mp3");
+                }
               } else if (screen_ == ScreenState::InGame) {
                 paused_ = !paused_;
                 statusBanner_ = paused_ ? "ПАУЗА" : "Игра продолжается";
