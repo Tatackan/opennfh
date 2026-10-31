@@ -291,6 +291,20 @@ bool GameEngine::init(const GameOptions& opts) {
       neighbor_.hidden = true;
       neighbor_.currentAnim = "inv";
     }
+  } else if (scr == "test_sofa_laxative_after") {
+    enterScreen(ScreenState::InGame);
+    neighbor_.room = "lir";
+    neighbor_.pos = Point{550, 420};
+    neighbor_.facing = 1;
+    neighbor_.currentAnim = "mr1";
+    currentBubbleIcon_ = "toilet";
+    int sofaIdx = findObjectIndex("lir/sofa", "lir");
+    if (sofaIdx >= 0) {
+      PlacedObject& so = level_.objects[sofaIdx];
+      so.currentAnim = "ms";
+      so.nextAnim = "ms";
+      so.animFrame = 0;
+    }
   } else if (scr == "test_toilet_empty") {
     enterScreen(ScreenState::InGame);
     woody_.room = "toi";
@@ -2325,8 +2339,16 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
           surpSt.triggerPrankScore = true;
           auto laxTrick = level_.tricks.find("kit/laxativebeer");
           if (laxTrick != level_.tricks.end()) surpSt.trick = laxTrick->second;
-          surpSt.transformObjectTo = "kit/beer";
+          surpSt.transformObjectTo = "lir/sofa";
           neighborQueue_.push_back(surpSt);
+
+          int laxIdx = findObjectIndex("kit/laxativebeer", "kit");
+          if (laxIdx >= 0) {
+            level_.objects[laxIdx].name = "kit/beer";
+            level_.objects[laxIdx].currentAnim = "ms";
+            level_.objects[laxIdx].nextAnim = "ms";
+            level_.objects[laxIdx].animFrame = 0;
+          }
 
           TaskStep leaveSt{};
           leaveSt.type = TaskStep::Type::PlayAction;
@@ -2336,6 +2358,7 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
           leaveSt.objAnim = "neighbor_leave";
           leaveSt.objNextAnim = "ms";
           leaveSt.durationTicks = animFrameCount(od->gfx, "neighbor_leave", 6);
+          leaveSt.transformObjectTo = "lir/sofa";
           neighborQueue_.push_back(leaveSt);
 
           currentBubbleIcon_ = "toilet";
