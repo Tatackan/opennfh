@@ -2265,7 +2265,7 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
   auto pushStep = [&](int targetIdx, const std::string& actAnim, const std::string& actNext,
                       const std::string& obAnim, const std::string& obNext, int fallbackTicks = 24,
                       const std::string& transformTo = "", bool scoreTrick = false,
-                      const TrickDef* trickPtr = nullptr, int secObjIdx = -1) {
+                      const TrickDef* trickPtr = nullptr, int secObjIdx = -1, bool hideOnFinish = false) {
     TaskStep st{};
     st.type = TaskStep::Type::PlayAction;
     st.objectIndex = targetIdx;
@@ -2284,6 +2284,7 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
       st.durationTicks = animFrameCount("neighbor", actAnim, fallbackTicks);
     }
     st.transformObjectTo = transformTo;
+    st.hideObjectOnFinish = hideOnFinish;
     if (scoreTrick && trickPtr) {
       st.triggerPrankScore = true;
       st.trick = *trickPtr;
@@ -2588,12 +2589,121 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
     if (hasPaper && !isStuffed) {
       int grabFrames = animFrameCount("toi/toilet", "grabpaper", 6);
       pushStep(objIdx, "inv", "ms2", "grabpaper", "ms", grabFrames);
+    } else if (isStuffed) {
+      int noPaperFrames = animFrameCount("toi/toilet", "nopaper", 15);
+      auto tpTrick = level_.tricks.find("toi/toiletstuffed");
+      pushStep(objIdx, "inv", "shout0", "nopaper", "ms", noPaperFrames);
+      pushStep(objIdx, "shout0", "clean", "ms", "ms", 26, "", true, tpTrick != level_.tricks.end() ? &tpTrick->second : nullptr);
+      pushStep(objIdx, "clean", "ms0", "ms", "ms", 47, "toi/toilet");
     } else {
       int noPaperFrames = animFrameCount("toi/toilet", "nopaper", 15);
-      auto tpTrick = level_.tricks.find(isStuffed ? "toi/toiletstuffed" : "toiletpaper");
-      pushStep(objIdx, "inv", "ms2", "nopaper", "ms", noPaperFrames, "toi/toilet",
-               tpTrick != level_.tricks.end(), tpTrick != level_.tricks.end() ? &tpTrick->second : nullptr);
+      auto tpTrick = level_.tricks.find("toiletpaper");
+      pushStep(objIdx, "inv", "shout0", "nopaper", "ms", noPaperFrames);
+      pushStep(objIdx, "shout0", "ms2", "ms", "ms", 26, "toi/toilet", tpTrick != level_.tricks.end(), tpTrick != level_.tricks.end() ? &tpTrick->second : nullptr);
     }
+    return;
+  }
+  if (lowerName == "kit/bowlingball") {
+    int kickFrames = animFrameCount("neighbor", "kickbowling", 40);
+    int winIdx = findObjectIndex("kit/window", po.roomName);
+    auto bTrick = level_.tricks.find("kit/bowlingball");
+    pushStep(objIdx, "kickbowling", "shout0", "ms", "ms", kickFrames, "", bTrick != level_.tricks.end(), bTrick != level_.tricks.end() ? &bTrick->second : nullptr);
+    pushStep(objIdx, "shout0", "take_short", "ms", "ms", 26);
+    if (winIdx >= 0) {
+      int throwFrames = animFrameCount("kit/window", "throw_bowling", 24);
+      pushStep(winIdx, "inv", "ms2", "throw_bowling", "ms", throwFrames);
+    }
+    pushStep(objIdx, "take_short", "ms1", "ms", "ms", 12, "kit/football", false, nullptr, -1, true);
+    return;
+  }
+  if (lowerName == "kit/football") {
+    int kickFrames = animFrameCount("neighbor", "kick", 16);
+    int winIdx = findObjectIndex("kit/window", po.roomName);
+    pushStep(objIdx, "kick", "ms1", "flyout", "inv", kickFrames);
+    if (winIdx >= 0) {
+      int shoutFrames = animFrameCount("kit/window", "shout", 37);
+      pushStep(winIdx, "inv", "ms2", "shout", "ms", shoutFrames);
+    }
+    return;
+  }
+  if (lowerName == "kit/window") {
+    int shoutFrames = animFrameCount("kit/window", "shout", 37);
+    pushStep(objIdx, "inv", "ms2", "shout", "ms", shoutFrames);
+    return;
+  }
+  if (lowerName == "anc/phone" || lowerName == "anc/phoneringing") {
+    auto phTrick = level_.tricks.find("anc/phone");
+    int phoneFrames = animFrameCount("neighbor", "phone", 33);
+    pushStep(objIdx, "phone", "shout0", "ring", "ms", phoneFrames, "", phTrick != level_.tricks.end(), phTrick != level_.tricks.end() ? &phTrick->second : nullptr);
+    pushStep(objIdx, "shout0", "ms2", "ms", "ms", 26, "anc/phone");
+    return;
+  }
+  if (lowerName == "anc/stinkflower") {
+    int smellCheeseFrames = animFrameCount("neighbor", "smellcheese", 28);
+    int pukeFrames = animFrameCount("neighbor", "puke", 31);
+    auto stTrick = level_.tricks.find("anc/stinkflower");
+    pushStep(objIdx, "smellcheese", "puke", "ms", "ms", smellCheeseFrames);
+    pushStep(objIdx, "puke", "shout0", "ms", "ms", pukeFrames);
+    pushStep(objIdx, "shout0", "clean", "ms", "ms", 26, "", stTrick != level_.tricks.end(), stTrick != level_.tricks.end() ? &stTrick->second : nullptr);
+    pushStep(objIdx, "clean", "ms2", "ms", "ms", 24, "anc/flower");
+    return;
+  }
+  if (lowerName == "anc/mum_smeared") {
+    int discFrames = animFrameCount("neighbor", "discover1", 20);
+    int cleanFrames = animFrameCount("neighbor", "clean", 24);
+    auto mTrick = level_.tricks.find("anc/mum_smeared");
+    pushStep(objIdx, "discover1", "shout0", "ms", "ms", discFrames);
+    pushStep(objIdx, "shout0", "clean", "ms", "ms", 26, "", mTrick != level_.tricks.end(), mTrick != level_.tricks.end() ? &mTrick->second : nullptr);
+    pushStep(objIdx, "clean", "ms1", "ms", "ms", cleanFrames, "anc/mum");
+    return;
+  }
+  if (lowerName == "kit/groundsoap" || lowerName == "toi/groundsoap") {
+    int slipFrames = animFrameCount("neighbor", "slip1", 24);
+    auto soapTrick = level_.tricks.find(lowerName);
+    pushStep(objIdx, "slip1", "shout0", "ms", "ms", slipFrames, "", soapTrick != level_.tricks.end(), soapTrick != level_.tricks.end() ? &soapTrick->second : nullptr);
+    pushStep(objIdx, "shout0", "ms2", "ms", "ms", 26, "", false, nullptr, -1, true);
+    return;
+  }
+  if (lowerName == "kit/foamcream") {
+    int spitFrames = animFrameCount("neighbor", "spit", 40);
+    auto foamTrick = level_.tricks.find("kit/foamcream");
+    pushStep(objIdx, "shavingfoam", "spit", "ms", "ms", 31);
+    pushStep(objIdx, "spit", "shout0", "ms", "ms", spitFrames);
+    pushStep(objIdx, "shout0", "clean", "ms", "ms", 26, "", foamTrick != level_.tricks.end(), foamTrick != level_.tricks.end() ? &foamTrick->second : nullptr);
+    pushStep(objIdx, "clean", "ms0", "ms", "ms", 23, "kit/whippedcream");
+    return;
+  }
+  if (lowerName == "kit/whippedcream") {
+    pushStep(objIdx, "whippedcream", "eatcake", "inv", "ms", 31);
+    pushStep(objIdx, "eatcake", "ms0", "ms", "ms", 29);
+    return;
+  }
+  if (lowerName == "toi/aftershave_glue") {
+    int stickyFrames = animFrameCount("neighbor", "stickyaftershave", 57);
+    auto agTrick = level_.tricks.find("toi/aftershave_glue");
+    pushStep(objIdx, "take_short", "stickyaftershave", "ms", "ms", 12);
+    pushStep(objIdx, "stickyaftershave", "shout0", "ms", "ms", stickyFrames, "", agTrick != level_.tricks.end(), agTrick != level_.tricks.end() ? &agTrick->second : nullptr);
+    pushStep(objIdx, "shout0", "ms0", "ms", "ms", 26, "toi/aftershave");
+    return;
+  }
+  if (lowerName == "toi/aftershave") {
+    pushStep(objIdx, "take_short", "shave", "ms", "ms", 12);
+    pushStep(objIdx, "shave", "give_short", "ms", "ms", 43);
+    pushStep(objIdx, "give_short", "ms0", "ms", "ms", 12);
+    return;
+  }
+  if (lowerName == "toi/grease_exchanged") {
+    int hairFrames = animFrameCount("neighbor", "deohair", 47);
+    auto geTrick = level_.tricks.find("toi/grease_exchanged");
+    pushStep(objIdx, "take_short", "deohair", "ms", "ms", 12);
+    pushStep(objIdx, "deohair", "shout0", "ms", "ms", hairFrames, "", geTrick != level_.tricks.end(), geTrick != level_.tricks.end() ? &geTrick->second : nullptr);
+    pushStep(objIdx, "shout0", "ms0", "ms", "ms", 26, "toi/grease");
+    return;
+  }
+  if (lowerName == "toi/grease") {
+    pushStep(objIdx, "take_short", "deo", "ms", "ms", 12);
+    pushStep(objIdx, "deo", "give_short", "ms", "ms", 33);
+    pushStep(objIdx, "give_short", "ms0", "ms", "ms", 12);
     return;
   }
   if (lowerName == "lir/twistedantenna") {
@@ -2606,9 +2716,13 @@ void GameEngine::enqueueNeighborObjectActions(int objIdx) {
     pushStep(objIdx, "inv", "ms3", "play", "ms", 45);
     return;
   }
-  if (lowerName == "lir/manipulatedscore") {
-    pushStep(objIdx, "inv", "inv", "play", "playslow_angry", 30);
-    pushStep(objIdx, "inv", "ms2", "playslow_angry", "ms", 36, "lir/score", isTricked, isTricked ? &trickIt->second : nullptr);
+  if (lowerName == "lir/scoresmeared" || lowerName == "lir/manipulatedscore") {
+    int offkeyFrames = animFrameCount("lir/score_smeared", "play", 41);
+    auto scTrick = level_.tricks.find("lir/scoresmeared");
+    if (scTrick == level_.tricks.end()) scTrick = level_.tricks.find("lir/manipulatedscore");
+    pushStep(objIdx, "inv", "shout0", "play", "ms", offkeyFrames);
+    pushStep(objIdx, "shout0", "clean", "ms", "ms", 26, "", scTrick != level_.tricks.end(), scTrick != level_.tricks.end() ? &scTrick->second : nullptr);
+    pushStep(objIdx, "clean", "ms0", "ms", "ms", 24, "lir/score");
     return;
   }
 
@@ -2964,17 +3078,40 @@ void GameEngine::updateNeighbor() {
   if (!alreadyActing && !neighbor_.hidden) {
     for (size_t i = 0; i < level_.objects.size(); ++i) {
       const PlacedObject& po = level_.objects[i];
-      if (!po.visible || toLowerAscii(po.roomName) != toLowerAscii(neighbor_.room)) continue;
-      auto trickIt = level_.tricks.find(toLowerAscii(po.name));
-      if (trickIt == level_.tricks.end()) continue;
+      if (!po.visible) continue;
+      bool sameRoom = (toLowerAscii(po.roomName) == toLowerAscii(neighbor_.room));
       bool isPassTrigger = false;
+      bool isHouseTrigger = false;
       for (const TriggerDef& tr : level_.triggers) {
         if (toLowerAscii(tr.object) == toLowerAscii(po.name)) {
-          isPassTrigger = true;
+          if (toLowerAscii(tr.position) == "house") {
+            isHouseTrigger = true;
+          } else if (sameRoom) {
+            isPassTrigger = true;
+          }
           break;
         }
       }
-      if (isPassTrigger) {
+      if (isHouseTrigger) {
+        bool alreadyHandling = false;
+        for (const TaskStep& st : neighborQueue_) {
+          if (st.objectIndex == (int)i) { alreadyHandling = true; break; }
+        }
+        if (!alreadyHandling) {
+          interruptedRoutineIdx_ = currentRoutineIdx_;
+          neighborQueue_.clear();
+          const ObjectDef* od = level_.findObjectDef(po.name);
+          Point hs = od ? od->hotspotOr("neighbor", Point{450, 420}) : Point{450, 420};
+          hs.x += po.position.x;
+          hs.y += po.position.y;
+          queueNeighborToRoom(po.roomName, hs, true);
+          TaskStep inter{};
+          inter.type = TaskStep::Type::InteractObject;
+          inter.objectIndex = (int)i;
+          neighborQueue_.push_back(inter);
+          break;
+        }
+      } else if (isPassTrigger) {
         const ObjectDef* od = level_.findObjectDef(po.name);
         Point hs = od ? od->hotspotOr("neighbor", Point{neighbor_.pos.x, 420}) : Point{neighbor_.pos.x, 420};
         hs.x += po.position.x;
@@ -3041,6 +3178,13 @@ void GameEngine::updateNeighbor() {
         if (std::abs(dx) > 0) {
           std::string want = (dx > 0) ? "mg1" : "mg3";
           int speed = actorSpeed("neighbor", want, 8);
+          if (currentBubbleIcon_ == "toilet" && actorSpeed("neighbor", "mrwc1", 0) > 0) {
+            want = (dx > 0) ? "mrwc1" : "mrwc3";
+            speed = actorSpeed("neighbor", want, 18);
+          } else if (neighborChasing_ || step.sneak) {
+            want = (dx > 0) ? "mr1" : "mr3";
+            speed = actorSpeed("neighbor", want, 14);
+          }
           if (neighbor_.currentAnim != want) {
             neighbor_.currentAnim = want;
             neighbor_.nextAnim = want;
@@ -3064,6 +3208,13 @@ void GameEngine::updateNeighbor() {
         } else {
           std::string want = (dy < 0) ? "mg0" : "mg2";
           int speed = actorSpeed("neighbor", want, 3);
+          if (currentBubbleIcon_ == "toilet" && actorSpeed("neighbor", "mrwc0", 0) > 0) {
+            want = (dy < 0) ? "mrwc0" : "mrwc2";
+            speed = actorSpeed("neighbor", want, 9);
+          } else if (neighborChasing_ || step.sneak) {
+            want = (dy < 0) ? "mr0" : "mr2";
+            speed = actorSpeed("neighbor", want, 6);
+          }
           if (neighbor_.currentAnim != want) {
             neighbor_.currentAnim = want;
             neighbor_.nextAnim = want;
