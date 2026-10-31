@@ -34,6 +34,42 @@ std::vector<fs::path> systemFonts() {
 #endif
 }
 
+std::string toUpperUtf8(const std::string& str) {
+  std::string res;
+  res.reserve(str.size());
+  for (size_t i = 0; i < str.size(); ++i) {
+    unsigned char c = (unsigned char)str[i];
+    if (c >= 'a' && c <= 'z') {
+      res += (char)(c - 'a' + 'A');
+    } else if (c == 0xD0 && i + 1 < str.size()) {
+      unsigned char c2 = (unsigned char)str[i + 1];
+      if (c2 >= 0xB0 && c2 <= 0xBF) {
+        res += (char)0xD0;
+        res += (char)(c2 - 0x20);
+        i++;
+      } else {
+        res += str[i];
+      }
+    } else if (c == 0xD1 && i + 1 < str.size()) {
+      unsigned char c2 = (unsigned char)str[i + 1];
+      if (c2 >= 0x80 && c2 <= 0x8F) {
+        res += (char)0xD0;
+        res += (char)(c2 + 0x20);
+        i++;
+      } else if (c2 == 0x91) {
+        res += (char)0xD0;
+        res += (char)0x81;
+        i++;
+      } else {
+        res += str[i];
+      }
+    } else {
+      res += str[i];
+    }
+  }
+  return res;
+}
+
 }  // namespace
 
 GameEngine::GameEngine() = default;
@@ -187,18 +223,18 @@ bool GameEngine::init(const GameOptions& opts) {
     completedSeason_ = 1;
     seasonTrophyTier_ = 3;
     enterScreen(ScreenState::SeasonVictory);
-  } else if (scr == "splash" || scr == "splash0" || scr == "loading0") {
-    loadingPhase_ = 0;
-    loadingTicks_ = 0;
-    enterScreen(ScreenState::LoadingSplash);
-  } else if (scr == "splash1" || scr == "loading1") {
-    loadingPhase_ = 1;
-    loadingTicks_ = 0;
-    enterScreen(ScreenState::LoadingSplash);
-  } else if (scr == "splash2" || scr == "loading" || scr == "loading2") {
-    loadingPhase_ = 2;
-    loadingTicks_ = 10;
-    enterScreen(ScreenState::LoadingSplash);
+  } else if (scr == "intro1" || scr == "splash" || scr == "splash0" || scr == "loading0") {
+    enterScreen(ScreenState::InGame);
+    levelIntroPhase_ = 1;
+    levelIntroTicks_ = 0;
+    statusBanner_.clear();
+    bannerTicks_ = 0;
+  } else if (scr == "intro2" || scr == "splash1" || scr == "loading1" || scr == "loading2" || scr == "loading") {
+    enterScreen(ScreenState::InGame);
+    levelIntroPhase_ = 2;
+    levelIntroTicks_ = 0;
+    statusBanner_.clear();
+    bannerTicks_ = 0;
   } else if (scr == "confirm") {
     enterScreen(ScreenState::InGame);
     confirmAction_ = ConfirmAction::RestartEpisode;
@@ -317,6 +353,9 @@ bool GameEngine::init(const GameOptions& opts) {
     }
   } else if (!opts.screenshot.empty() || !opts.recordDir.empty()) {
     enterScreen(ScreenState::InGame);
+    if (scr != "intro1" && scr != "intro2" && scr != "splash" && scr != "splash0" && scr != "splash1") {
+      levelIntroPhase_ = 0;
+    }
   } else if (opts.startInLevel) {
     startLevelWithSplash(startIdx);
   } else {
@@ -604,14 +643,15 @@ bool GameEngine::isLevelUnlocked(int levelIdx) const {
 
 void GameEngine::startLevelWithSplash(int levelIdx) {
   selectLevel(levelIdx);
-  if (!opts_.screenshot.empty()) {
-    enterScreen(ScreenState::InGame);
-    return;
+  statusBanner_.clear();
+  bannerTicks_ = 0;
+  levelIntroPhase_ = opts_.screenshot.empty() ? 1 : 0;
+  levelIntroTicks_ = 0;
+  enterScreen(ScreenState::InGame);
+  if (levelIntroPhase_ > 0) {
+    playSfx("sfx/dog_bark1.wav");
+    startMusic("sfx/music/jingle_levelstart.mp3");
   }
-  loadingPhase_ = 0;
-  loadingTicks_ = 0;
-  enterScreen(ScreenState::LoadingSplash);
-  playSfx("sfx/dog_bark1.wav");
 }
 
 void GameEngine::enterScreen(ScreenState st) {
@@ -624,11 +664,11 @@ void GameEngine::enterScreen(ScreenState st) {
   if (st == ScreenState::MainMenu || st == ScreenState::EpisodeSelect || st == ScreenState::Options ||
       st == ScreenState::Credits) {
     startMusic("sfx/music/titel.mp3");
-  } else if (st == ScreenState::LoadingSplash) {
-    stopMusic();
   } else if (st == ScreenState::InGame) {
-    std::string setLow = toLowerAscii(level_.info.setName);
-    startMusic((setLow == "set02" || setLow == "set03") ? "sfx/music/ingame2_normal.mp3" : "sfx/music/ingame1_slow.mp3");
+    if (levelIntroPhase_ == 0) {
+      std::string setLow = toLowerAscii(level_.info.setName);
+      startMusic((setLow == "set02" || setLow == "set03") ? "sfx/music/ingame2_normal.mp3" : "sfx/music/ingame1_slow.mp3");
+    }
   }
 
   if (st == ScreenState::Options) {
@@ -3405,21 +3445,28 @@ void GameEngine::tickSimulation() {
     return;
   }
 
-  if (screen_ == ScreenState::LoadingSplash) {
-    loadingTicks_++;
-    if (loadingPhase_ == 0) {
-      if (loadingTicks_ >= 34) {
-        loadingPhase_ = 1;
-        loadingTicks_ = 0;
+  if (screen_ == ScreenState::InGame && levelIntroPhase_ > 0) {
+    const std::string iscr = toLowerAscii(opts_.initialScreen);
+    if (iscr == "intro1") {
+      levelIntroPhase_ = 1;
+      return;
+    }
+    if (iscr == "intro2") {
+      levelIntroPhase_ = 2;
+      return;
+    }
+    levelIntroTicks_++;
+    if (levelIntroPhase_ == 1) {
+      if (levelIntroTicks_ >= 50) {
+        levelIntroPhase_ = 2;
+        levelIntroTicks_ = 0;
       }
-    } else if (loadingPhase_ == 1) {
-      if (loadingTicks_ >= 34) {
-        loadingPhase_ = 2;
-        loadingTicks_ = 0;
-      }
-    } else if (loadingPhase_ == 2) {
-      if (loadingTicks_ >= 38) {
-        enterScreen(ScreenState::InGame);
+    } else if (levelIntroPhase_ == 2) {
+      if (levelIntroTicks_ >= 60) {
+        levelIntroPhase_ = 0;
+        levelIntroTicks_ = 0;
+        std::string setLow = toLowerAscii(level_.info.setName);
+        startMusic((setLow == "set02" || setLow == "set03") ? "sfx/music/ingame2_normal.mp3" : "sfx/music/ingame1_slow.mp3");
       }
     }
     return;
@@ -4137,64 +4184,74 @@ void GameEngine::renderEpisodeSelect() {
   renderBriefingRightPanel(previewLevelIdx_, false);
 }
 
-void GameEngine::renderLoadingSplash() {
-  if (loadingPhase_ == 0) {
-    // 1. Studio Splash: JoWooD Productions präsentiert + sleeping dog
-    drawMenuImage("gfx/gui/main/splasher.tga", 0, 0);
-  } else if (loadingPhase_ == 1) {
-    // 2. Game Splash: Cinema theater screen with Woody & Neighbor watching game logo
-    drawMenuImage("gfx/gui/main/splasher1.tga", 0, 0);
-    const TexEntry* logo = getTexture("gfx/gui/logo/logo_main.tga");
+void GameEngine::renderLevelIntroOverlay() {
+  if (levelIntroPhase_ <= 0) return;
+
+  auto drawTextWithOutline = [&](TextRenderer& font, const std::string& str, const SDL_Rect& rect,
+                                 SDL_Color fg, SDL_Color bg, int outline, float scale = 1.0f) {
+    int outPx = std::max(1, int(std::round(outline * menuScale())));
+    for (int dx = -outPx; dx <= outPx; dx += outPx) {
+      for (int dy = -outPx; dy <= outPx; dy += outPx) {
+        if (dx == 0 && dy == 0) continue;
+        SDL_Rect r = rect;
+        r.x += dx;
+        r.y += dy;
+        font.drawAligned(str, r, bg, 0, 0, scale);
+      }
+    }
+    font.drawAligned(str, rect, fg, 0, 0, scale);
+  };
+
+  if (levelIntroPhase_ == 1) {
+    // Phase 1: JoWooD Vienna TV (Dog logo) + "ПРЕДСТАВЛЯЕТ"
+    const TexEntry* logo = getTexture("gfx/gui/logo/JWD_vienna.tga");
     if (logo) {
-      int lw = int(logo->w * 1.15f);
-      int lh = int(logo->h * 1.15f);
+      int lw = logo->w;
+      int lh = logo->h;
       int lx = (800 - lw) / 2;
-      int ly = 190;
+      int ly = 95;
       SDL_Rect dst = menuRect(lx, ly, lw, lh);
       SDL_RenderCopy(ren_, logo->tex, nullptr, &dst);
     }
-    fontSmall_.drawAligned("OpenNFH v0.2.0 (Buka / JoWooD 1.11)", menuRect(15, 565, 400, 25),
-                           SDL_Color{200, 200, 200, 220}, -1, 1);
-  } else {
-    // 3. Level Splash: Polaroid loading screen with episode briefing
-    drawMenuImage("gfx/loading.tga", 0, 0);
+    std::string presentsText = level_.getString("presents", "levelstart");
+    if (presentsText.empty()) presentsText = "представляет";
+    presentsText = toUpperUtf8(presentsText);
+
+    SDL_Rect textRect = menuRect(0, 395, 800, 38);
+    drawTextWithOutline(fontComicBig_, presentsText, textRect,
+                        SDL_Color{255, 255, 255, 255}, SDL_Color{0, 0, 0, 255}, 2, 1.05f * menuScale());
+  } else if (levelIntroPhase_ == 2) {
+    // Phase 2: Game title logo + "В СЕРИИ" + Episode Title
+    const TexEntry* logo = getTexture("gfx/gui/logo/logo_main.tga");
+    if (logo) {
+      int lw = logo->w;
+      int lh = logo->h;
+      int lx = (800 - lw) / 2;
+      int ly = 135;
+      SDL_Rect dst = menuRect(lx, ly, lw, lh);
+      SDL_RenderCopy(ren_, logo->tex, nullptr, &dst);
+    }
+
+    std::string inText = level_.getString("in", "levelstart");
+    if (inText.empty()) inText = "в серии";
+    inText = toUpperUtf8(inText);
+
+    SDL_Rect inRect = menuRect(0, 340, 800, 32);
+    drawTextWithOutline(fontComic_, inText, inRect,
+                        SDL_Color{255, 255, 255, 255}, SDL_Color{0, 0, 0, 255}, 2, 1.0f * menuScale());
 
     int lIdx = std::clamp(currentLevelIdx_, 0, (int)levels_.size() - 1);
-    const LevelInfo& li = levels_[lIdx];
-    const BriefingInfo& bi = (lIdx < (int)briefings_.size()) ? briefings_[lIdx] : BriefingInfo{};
-
-    // Episode title
-    std::string title = bi.title.empty() ? li.name : bi.title;
-    fontBig_.drawAligned(title, menuRect(30, 35, 740, 45), SDL_Color{255, 230, 130, 255}, 0, 0);
-
-    // Episode preview card
-    std::string previewPath = "gfx/gui/main/" + li.name + ".tga";
-    drawMenuImage(previewPath, 50, 110);
-
-    // Hint / Briefing text
-    if (!bi.hintText.empty()) {
-      fontUI_.drawAligned("Подсказка!", menuRect(250, 105, 500, 25), SDL_Color{255, 215, 0, 255}, -1, 0);
-      fontSmall_.drawWrapped(bi.hintText, menuRect(250, 130, 500, 60), SDL_Color{255, 255, 255, 255}, -1, 0);
+    std::string epTitle;
+    if (lIdx < (int)briefings_.size() && !briefings_[lIdx].title.empty()) {
+      epTitle = briefings_[lIdx].title;
+    } else {
+      epTitle = levels_[lIdx].name;
     }
-    if (!bi.briefing.empty()) {
-      fontSmall_.drawWrapped(bi.briefing, menuRect(250, 200, 500, 150), SDL_Color{230, 230, 230, 255}, -1, 0);
-    }
+    epTitle = toUpperUtf8(epTitle);
 
-    // Animated loading indicator
-    std::string loadStr = "Загрузка серии";
-    int dots = (loadingTicks_ / 6) % 4;
-    for (int i = 0; i < dots; ++i) loadStr += ".";
-    fontBig_.drawAligned(loadStr, menuRect(0, 515, 800, 40), SDL_Color{255, 255, 255, 255}, 0, 0);
-
-    // Progress bar frame
-    SDL_Rect barBg = menuRect(200, 560, 400, 14);
-    SDL_SetRenderDrawColor(ren_, 30, 30, 30, 220);
-    SDL_RenderFillRect(ren_, &barBg);
-
-    float frac = std::clamp(float(loadingTicks_) / 38.0f, 0.05f, 1.0f);
-    SDL_Rect barFg = menuRect(202, 562, int(396.0f * frac), 10);
-    SDL_SetRenderDrawColor(ren_, 245, 175, 40, 255);
-    SDL_RenderFillRect(ren_, &barFg);
+    SDL_Rect epRect = menuRect(10, 385, 780, 48);
+    drawTextWithOutline(fontComicBig_, epTitle, epRect,
+                        SDL_Color{255, 255, 255, 255}, SDL_Color{0, 0, 0, 255}, 2, 1.15f * menuScale());
   }
 }
 
@@ -4638,16 +4695,6 @@ void GameEngine::onMenuClick(Point mp, bool doubleClick) {
       break;
     }
 
-    case ScreenState::LoadingSplash: {
-      if (loadingPhase_ < 2) {
-        loadingPhase_++;
-        loadingTicks_ = 0;
-      } else {
-        enterScreen(ScreenState::InGame);
-      }
-      break;
-    }
-
     case ScreenState::LevelSummary: {
       if (Rect{125 + 190, 70 + 312, 115, 32}.contains(mp.x, mp.y)) {
         playSfx("sfx/but1.wav");
@@ -4710,9 +4757,6 @@ void GameEngine::render() {
     case ScreenState::EpisodeSelect:
       renderEpisodeSelect();
       break;
-    case ScreenState::LoadingSplash:
-      renderLoadingSplash();
-      break;
     case ScreenState::PauseMenu:
       renderPauseMenu();
       break;
@@ -4728,6 +4772,9 @@ void GameEngine::render() {
     case ScreenState::InGame:
       renderWorld();
       renderHud();
+      if (levelIntroPhase_ > 0) {
+        renderLevelIntroOverlay();
+      }
       break;
     case ScreenState::LevelSummary:
       renderWorld();
@@ -4794,6 +4841,18 @@ int GameEngine::run() {
             if (e.button.button == SDL_BUTTON_LEFT) {
               onMenuClick(screenToMenu(mouseX_, mouseY_), e.button.clicks >= 2);
             }
+          } else if (levelIntroPhase_ > 0) {
+            if (e.button.button == SDL_BUTTON_LEFT) {
+              if (levelIntroPhase_ == 1) {
+                levelIntroPhase_ = 2;
+                levelIntroTicks_ = 0;
+              } else {
+                levelIntroPhase_ = 0;
+                levelIntroTicks_ = 0;
+                std::string setLow = toLowerAscii(level_.info.setName);
+                startMusic((setLow == "set02" || setLow == "set03") ? "sfx/music/ingame2_normal.mp3" : "sfx/music/ingame1_slow.mp3");
+              }
+            }
           } else {
             Point wp = screenToWorld(mouseX_, mouseY_);
             updateHover(wp.x, wp.y, mouseX_, mouseY_);
@@ -4817,6 +4876,16 @@ int GameEngine::run() {
             case SDLK_ESCAPE:
               if (confirmAction_ != ConfirmAction::None) {
                 confirmAction_ = ConfirmAction::None;
+              } else if (screen_ == ScreenState::InGame && levelIntroPhase_ > 0) {
+                if (levelIntroPhase_ == 1) {
+                  levelIntroPhase_ = 2;
+                  levelIntroTicks_ = 0;
+                } else {
+                  levelIntroPhase_ = 0;
+                  levelIntroTicks_ = 0;
+                  std::string setLow = toLowerAscii(level_.info.setName);
+                  startMusic((setLow == "set02" || setLow == "set03") ? "sfx/music/ingame2_normal.mp3" : "sfx/music/ingame1_slow.mp3");
+                }
               } else if (screen_ == ScreenState::InGame) {
                 if (selectedInv_ >= 0) selectedInv_ = -1;
                 else {
@@ -4826,13 +4895,6 @@ int GameEngine::run() {
               } else if (screen_ == ScreenState::PauseMenu) {
                 playSfx("sfx/but1.wav");
                 enterScreen(ScreenState::InGame);
-              } else if (screen_ == ScreenState::LoadingSplash) {
-                if (loadingPhase_ < 2) {
-                  loadingPhase_++;
-                  loadingTicks_ = 0;
-                } else {
-                  enterScreen(ScreenState::InGame);
-                }
               } else if (screen_ == ScreenState::EpisodeSelect || screen_ == ScreenState::Credits) {
                 playSfx("sfx/but1.wav");
                 enterScreen(ScreenState::MainMenu);
@@ -4850,12 +4912,15 @@ int GameEngine::run() {
               break;
             case SDLK_RETURN:
             case SDLK_SPACE:
-              if (screen_ == ScreenState::LoadingSplash) {
-                if (loadingPhase_ < 2) {
-                  loadingPhase_++;
-                  loadingTicks_ = 0;
+              if (screen_ == ScreenState::InGame && levelIntroPhase_ > 0) {
+                if (levelIntroPhase_ == 1) {
+                  levelIntroPhase_ = 2;
+                  levelIntroTicks_ = 0;
                 } else {
-                  enterScreen(ScreenState::InGame);
+                  levelIntroPhase_ = 0;
+                  levelIntroTicks_ = 0;
+                  std::string setLow = toLowerAscii(level_.info.setName);
+                  startMusic((setLow == "set02" || setLow == "set03") ? "sfx/music/ingame2_normal.mp3" : "sfx/music/ingame1_slow.mp3");
                 }
               } else if (screen_ == ScreenState::InGame) {
                 paused_ = !paused_;

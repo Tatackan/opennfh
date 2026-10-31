@@ -34,7 +34,6 @@ class GameEngine {
   enum class ScreenState {
     MainMenu,
     EpisodeSelect,
-    LoadingSplash,
     InGame,
     PauseMenu,
     Options,
@@ -209,7 +208,7 @@ class GameEngine {
   void renderHud();
   void renderMainMenu();
   void renderEpisodeSelect();
-  void renderLoadingSplash();
+  void renderLevelIntroOverlay();
   void startLevelWithSplash(int levelIdx);
   void renderPauseMenu();
   void renderBriefingRightPanel(int levelIdx, bool isInGameMenu);
@@ -239,8 +238,8 @@ class GameEngine {
   ScreenState screen_ = ScreenState::MainMenu;
   ScreenState optionsReturnScreen_ = ScreenState::MainMenu;
   int previewLevelIdx_ = 0;  // selected level in EpisodeSelect
-  int loadingPhase_ = 0;     // 0=studio, 1=game, 2=level
-  int loadingTicks_ = 0;
+  int levelIntroPhase_ = 0;  // 0=none, 1=JoWooD TV dog logo, 2=Game logo & episode title
+  int levelIntroTicks_ = 0;
   std::string currentMusicVpath_;
 
   // Confirmation modal state
